@@ -1,0 +1,1795 @@
+# ============================================================
+# v58 - 15 s SMOOTHING REMOVED from the Energy/Home tile and Load.
+#       Measured 2026-10-28: the BMS integration (bms_ble v2.18.0) updates
+#       every 30 s - hard-coded UPDATE_INTERVAL = 30 in its const.py - and
+#       the 15 s moving average added up to 15 s more on top (worst case
+#       ~45 s after a load switched on). One BMS reading per window means
+#       the average no longer smooths anything; it only delays.
+#       Camper Charge Display and Camper Load Current now read
+#       sensor.camper_battery_current / _power directly, so the tile
+#       updates on the same 30 s cycle as the bank cards.
+#       The two filter sensors (Camper Battery Current/Power Smoothed) are
+#       DELETED - nothing else used them. Remove the two leftover entities
+#       in Settings > Entities after the restart.
+# v52 - SUSPENSION SETTINGS LOCK.
+#       input_boolean.camper_settings_unlock gates the Suspension Settings
+#       and Mode Preset cards on the dashboard. Locked is the default and the
+#       state after every restart.
+#       The cards stay VISIBLE when locked - every slider position is still
+#       readable - they are simply not interactive. Hiding them would have
+#       meant unlocking just to check a value.
+#       An automation relocks 5 minutes after unlocking.
+#       NOTE: HA cannot put a confirmation on a slider row; confirmations
+#       only exist on tap_action, and dragging is not a tap. The popup
+#       therefore lives on the UNLOCK button instead.
+# v51 - Tank & Pipe Heater icon mdi:heat-wave -> mdi:snowflake-melt. The
+#       circuit exists to stop things freezing, and a melting snowflake says
+#       that directly; heat-wave was generic and clashed conceptually with
+#       the Diesel Heater, which is about comfort rather than frost.
+# v50 - Icon entries repointed for firmware v2.2.0:
+#         switch.relay_board_spare_13 -> switch.relay_board_steps
+#         switch.relay_board_spare_16 -> switch.relay_board_tank_pipe_heater
+#       Icons only. These customize entries override the tile icons, so they
+#       must move with the firmware rename or HA keeps showing the old ones.
+# v49 - WAN Down/Up Mbps now round to 3 decimals instead of 2. At real
+#       trailer traffic levels (~860 B/s = 0.0069 Mbps) two decimals rounded
+#       the value to 0.01 or 0.0, so any display built on it read zero
+#       regardless of actual throughput. Pairs with dashboard v161, which
+#       formats these as kbps below 1 Mbps.
+# v48 - Cell Rating gets an availability template. It had none, so an
+#       unavailable Cell Signal fell through | float(0) and was reported as
+#       "Poor" - indistinguishable from a genuinely weak signal. Same class
+#       of bug as the v34 unique_id mistake: a missing value silently
+#       becoming a plausible wrong one.
+# v47 - CELLULAR SIGNAL CORRECTED + new router sensors.
+#       THE BUG: "Cell Signal" showed the WI-FI REPEATER strength whenever
+#       the repeater was connected - i.e. almost always. A tile labelled
+#       cellular has never actually shown cellular while repeating (measured:
+#       85% displayed = -56 dBm Wi-Fi, while real cellular was RSRP -88 /
+#       SINR 16 = 69%, "Good" not "Excellent").
+#       Also mis-scaled: (RSSI+100)/40 puts -60 dBm at 100%, so -58 measured
+#       105% and clamped - the gauge pinned across a wide range of real
+#       conditions.
+#       NOW: Cell Signal = cellular only, from RSRP (70%) + SINR (30%), the
+#       measures the comment always claimed to use but whose entities did not
+#       exist until the integration update. The repeater link gets its own
+#       "Camper Repeater Signal" sensor.
+#       WAN Mode gains the network generation (" · 5G" / " · 4G") from the
+#       newly available cellular_band entity.
+#
+#       NOT DONE, deliberately: a data-usage gauge. wan_total_download reads
+#       1386 "Gbit" (=173 GB) but the router booted 4.5h ago - impossible on
+#       cellular, so either it is a lifetime counter or the unit is wrong.
+#       Verify against the router UI before trusting it against a data cap.
+#
+#       NOT DONE, needs ground truth: a real "Primary WAN" sensor. Ethernet,
+#       repeater AND cellular are all Up at once; camper_wan_mode just
+#       returns whichever it checks first (repeater), which is a guess, not a
+#       measurement. Check the router's Multi-WAN priority screen.
+# v46 - Stabilisers icon mdi:car-lifted-pickup -> mdi:screw-lag, matching
+#       dashboard v157. This customize entry overrides the tile icons, so it
+#       has to change too or HA puts the old one back.
+# v45 - RE15 icon entry repointed: switch.relay_board_spare_15 ->
+#       switch.relay_board_stabilisers, to match firmware v2.1.9 where that
+#       relay became the 90A stabiliser/steps contactor. Icon only; no logic.
+# v44 - Load now reads the SMOOTHED battery current. The Energy tile showed
+#       two different numbers for the same thing ("Discharging 3.5A" from the
+#       smoothed sensor, "Load 3.8A" from the raw one). Both were right; they
+#       were just filtered differently. Load now uses the same smoothed value,
+#       so the two rows agree. Falls back to raw if the filter sensor is
+#       unavailable. The raw sensor itself is UNCHANGED, so history,
+#       statistics and the Energy dashboard keep their exact values.
+#
+#       KNOWN LIMITATION, unchanged: Load = solar amps - battery amps, which
+#       assumes solar is the ONLY charging source. Add a DC-DC or shore
+#       charger and battery current can exceed solar, making this go negative
+#       and clamp to 0 - i.e. it would read 0 W while you are really drawing
+#       power. Revisit if another charging source is ever fitted.
+# v43 - CRITICAL FIX for a bug I introduced in v40. The "- binary_sensor:"
+#       block for Camper Any Alert was inserted in the MIDDLE of the sensor
+#       list. In HA's template schema each "- sensor:" / "- binary_sensor:"
+#       starts a new entry, so all seven sensors defined after it -
+#       suspension stance, suspension balance, clear/gray water tank and the
+#       three temperatures - were redefined as BINARY sensors. HA therefore
+#       stopped providing sensor.clear_water_tank et al, which is the
+#       "no longer being provided by the template integration" warning.
+#       The block now sits at the END of template:, where it cannot split
+#       anything. Sensor count is back to 32.
+# v42 - Four alerts added, all for things that previously failed SILENTLY:
+#         RELAY BOARD OFFLINE          - lights/pump/inverter/gauges all dead
+#         AIR SUSPENSION BOARD OFFLINE - no height, pressure or levelling
+#         BATTERY ON SHUNT FALLBACK    - a BMS bank dropped; readings look
+#                                        normal but now come from the shunt
+#         WATER PUMP RUNNING DRY       - pump on with the clear tank <= 5%
+#       Board-offline alerts are listed FIRST because a dead board also
+#       silences the alerts that depend on its sensors - this explains them.
+#       Detection is by a representative entity going 'unavailable', which is
+#       what ESPHome does to every entity on a device when it drops.
+#       The dry-run alert only WARNS; it does not switch the pump off.
+# v41 - Added BATTERY LOW alert: red, fires at or below 20% SOC, points at
+#       the Energy tab. Reads sensor.camper_battery_soc, so it follows the
+#       BMS -> 920Ah shunt fallback automatically. float(-1) guard means an
+#       unavailable SOC cannot be read as 0% and raise a false alarm.
+# v40 - GLOBAL ALERTS. sensor.camper_alert_summary collects every fault
+#       condition into one 'lines' attribute; binary_sensor.camper_any_alert
+#       says whether any is active. The dashboard prints these on EVERY tab,
+#       so a Suspension fault is visible while you are looking at Cameras.
+#       The six per-tab banners on Climate and Suspension are REMOVED in
+#       dashboard v153 - this replaces them, it does not duplicate them.
+#       To add or reword an alert, edit ONLY this block.
+#       Water alerts use float(-1) so they self-suppress while the tank
+#       sensors are unavailable (gauges relay off 00:00-07:00).
+# v39 - ALL PLACEHOLDERS REMOVED. The three temp input_numbers
+#       (clear_water_temp / gray_water_temp / pipe_temp) are deleted along
+#       with the two level ones from v38. Delete all five in
+#       Settings > Devices > Helpers too, or they linger as orphans.
+#       The three temperature TEMPLATE sensors are retained as unavailable
+#       stubs so their entity ids and history survive for the Dallas
+#       sensors - they will read "unavailable" until then, by design.
+# v38 - WATER LEVELS ARE REAL. sensor.clear_water_tank and
+#       sensor.gray_water_tank now read the KC868 relay board's AI1/AI2 tank
+#       sensors instead of the test sliders. Entity ids unchanged.
+#       input_number.clear_water_placeholder and .gray_water_placeholder are
+#       DELETED - also delete them in Settings > Devices > Helpers or they
+#       linger as orphans.
+#       The three TEMP placeholders stay, for the Dallas sensors later.
+# v37 - Exterior On and Night Mode are now TOGGLES, matching Stealth: press
+#       once to apply, press again to undo. All On / All Off stay one-shot,
+#       since they are already each other's opposite.
+#       Script ids are unchanged so the dashboard tiles keep resolving.
+# v36 - MERGE. Rebased onto the owner's LIVE v34, which contained two fixes my
+#       branch did not have (my v34/v35 were built from v33 and silently
+#       dropped them). Both are now restored:
+#         * Cell Rating read sensor.camper_cell_signal_PCT - that is a
+#           unique_id, not an entity id, so it always resolved to 0 -> "Poor".
+#           Now reads sensor.camper_cell_signal.
+#         * camper_heat_hours_left emitted the literal string "unknown" into
+#           a sensor with unit h, throwing a template ERROR on every update.
+#           Now uses an availability template (rate > 0.02).
+#       Everything from v34 (relay-board migration, scenes/scripts rebuilt on
+#       the real relay map) and v35 (920Ah shunt fallback) is retained.
+#       USE THIS FILE, not v34 or v35.
+# v35 - 920Ah SHUNT REINSTATED AS FALLBACK (per the owner, 2026-09-25).
+#       Rule: BOTH BMS banks reporting -> BMS. EITHER bank missing -> the
+#       Renogy 920Ah shunt for EVERY battery figure. Both gone -> unavailable.
+#       Recovery is automatic the moment both banks report again.
+#
+#       WHY NOT "use the surviving bank": current and power are SUMMED across
+#       the two banks, so one bank dropping off BLE would have silently halved
+#       them while still looking available - a wrong number, not a missing one.
+#       Switching the whole set to the shunt keeps ONE coherent source rather
+#       than mixing BMS voltage with shunt current.
+#
+#       SHUNT ENTITY IDS - this file is the only place they appear:
+#         sensor.920ah_battery_pack_ampers
+#         sensor.920ah_battery_pack_battery_voltage
+#         sensor.920ah_battery_pack_state_of_charge
+#       A wrong id makes that figure go UNAVAILABLE, never wrong.
+#
+#       DERIVED IN FALLBACK (the shunt lacks these sensors):
+#         Power         = shunt amps x shunt volts
+#         Stored Energy = 11776 Wh x shunt SOC / 100
+#       ASSUMED: shunt sign convention matches BMS, + = charging.
+# v34 - RELAY BOARD MIGRATION. ESPHome device renamed kc868-a16s ->
+#       relay-board, so every switch.kc868_a16s_camper_panel_relay_N
+#       becomes switch.relay_board_<name>. Needs firmware v2.1.0.
+#       NOT a blind rename: the old package mapped relay NUMBERS to the
+#       wrong FUNCTIONS (it had RE05=Outdoor Front, RE11=Water Pump; the
+#       cable-by-cable doc says RE05=Main Bedroom Red, RE11=Inverter).
+#       Customize icons, all 5 scene sensors and all 5 light scripts were
+#       therefore rewritten from the correct map rather than migrated.
+#       BUG FIXED: All Lights On/Off looped relays 1..10, which on the
+#       correct map includes the Fan (RE07) and Water Pump (RE09). The
+#       eight lighting relays are now listed explicitly.
+#       Battery charge/discharge was ALREADY BMS-only since v25 - verified,
+#       no change needed there.
+# SMART CAMPER - Home Assistant package  (v33)
+# Replaces v17. Place in /homeassistant/packages/camper.yaml
+#
+# v33 - Thermostat dial limited to 36 C at the UI level via customize
+#       (max_temp), not just corrected afterwards by the automation.
+#
+# v32 - Gear buttons now show PENDING: script.camper_set_gear records the
+#       pressed gear in input_number.camper_pending_gear, sets it, waits for
+#       the heater to actually report it, then clears the flag - so the button
+#       can blink instead of looking dead during the delay.
+#       Also clamps the climate target temperature to 36 C (the heater's real
+#       display maximum) instead of letting 40 be set and silently revert.
+#
+# v31 - script.camper_heater_set_mode: sets the running-mode select AND the
+#       climate hvac_mode together. Changing the select alone left the
+#       thermostat card showing the gear/fan control after switching back to
+#       Temperature. Only adjusts hvac_mode if the heater is already running.
+#
+# v30 - Capacity comes from our OWN dropdown again
+#       (input_select.camper_fuel_tank_capacity, 5-30 L presets). The
+#       heater's select.diesel_heater_tank_volume reads "unknown" and cannot
+#       be set on this unit, so it is not used anywhere.
+#
+# v29 - Fuel inputs are DROPDOWNS, not sliders. "Litres in tank now" is a new
+#       input_select (0 - 10 L in 0.5 L steps). Tank CAPACITY now reads the
+#       heater's OWN select.diesel_heater_tank_volume (5/10/15/20... presets),
+#       so there is no duplicate helper - set it once there and both the
+#       integration and this gauge use the same value.
+#
+# v28 - Fuel inputs back to DRAG sliders (mode: slider). "Litres in tank now"
+#       is capped at 10 L to match the real tank, so the full slider travel
+#       maps to the usable range instead of half of it being dead. Capacity
+#       keeps max 20 L in case a bigger tank is fitted later.
+#
+# v27 - Fuel inputs: step 0.5 L, max 20 L (tank is 10 L), and mode: box so
+#       they are typed/stepped rather than dragged on a slider.
+#       BUGFIX: removed "initial:" from all four fuel helpers. Home Assistant
+#       resets an input_number to its "initial" on EVERY restart, which would
+#       have wiped camper_fuel_baseline and made the tank gauge jump after
+#       each reboot. Without it the values persist correctly.
+#
+# v26 - VEVOR DIESEL HEATER: virtual fuel tank. The heater reports litres
+#       CONSUMED but has no tank-level sensor, so the tank is modelled here:
+#       enter litres in the tank and press SET LEVEL (script.camper_set_fuel_
+#       level) - it snapshots the heater's cumulative total, and remaining =
+#       entered - (total_now - snapshot). Supports partial fills. Adds
+#       Fuel Remaining (L), Fuel Remaining Percent, Heat Hours Left and a
+#       human "Heat Time Left". Guards against the heater's counter resetting.
+#
+# v25 - SHUNT REMOVED COMPLETELY. Every battery figure now comes ONLY from
+#       the two BMS banks; every solar figure ONLY from the Renogy MPPTs.
+#       If one bank goes unavailable the sensors report the SURVIVING bank
+#       (partial values) instead of going blank; they only go unavailable if
+#       BOTH banks are gone. No 920ah_battery_pack_* references remain.
+#
+# v24 - ALL BATTERY DATA NOW COMES FROM THE TWO BMS BANKS. The Renogy
+#       integration (now cloud-based) is unreliable and its entities were
+#       unavailable, blanking Voltage / Time Left / Energy. Changed:
+#         Battery Current = battery_1_current + battery_2_current (SUM)
+#         Battery Power   = battery_1_power   + battery_2_power   (SUM)
+#         Battery Voltage = NEW sensor, average of the two banks
+#         Charge State    = sign of the summed BMS current (+ = charging)
+#         SOC             = average of the two banks (from v23)
+#         Runtime/Load    = now read the camper_* BMS-derived sensors
+#       The Renogy shunt remains only as a LAST-RESORT fallback in each
+#       template, so nothing breaks if it ever comes back.
+#       SOLAR + SHUNT REPOINTED to the CLOUD integration's ids (which are the
+#       ORIGINAL names - the v21 local-BT renames were wrong for cloud):
+#         mppt_N_pv_power              -> mppt_N_current_solar_watts
+#         mppt_N_battery_current       -> mppt_N_aux_battery_charging_ampers
+#         mppt_N_power_generation_total-> mppt_N_total_energy_generated (Wh -> /1000 restored)
+#         920ah_battery_*              -> 920ah_battery_pack_* (ampers /
+#                                         battery_voltage / state_of_charge)
+#
+# v23 - Battery SOC now comes from the BMS packs (AVERAGE of
+#       battery_1_battery + battery_2_battery) instead of the Renogy shunt -
+#       the BMS measures inside the pack and is the more accurate source.
+#       Degrades gracefully: one pack offline -> uses the other; both offline
+#       -> falls back to the shunt SOC. Stored-energy/runtime math unchanged.
+#
+# v22 - Smoothed ENERGY tile. The shunt now runs in sustained BLE mode and
+#       pushes live updates, so Charging A/W twitched on every notification.
+#       Added two filter sensors (15s time_simple_moving_average) on
+#       920ah_battery_current + 920ah_battery_power, and the Energy tile
+#       (camper_charge_display) now reads those. DISPLAY ONLY - the raw
+#       shunt sensors, history, statistics and Energy dashboard are unchanged.
+#       Falls back to the raw values if a filter sensor is unavailable.
+#
+# v21 - RENOGY MIGRATION (Core removed -> new local-BT integration).
+#       Repointed every battery/solar entity to the new IDs:
+#         920ah_battery_ampers        -> 920ah_battery_current
+#         920ah_battery_battery_voltage -> 920ah_battery_voltage
+#         mppt_N_current_solar_watts  -> mppt_N_pv_power
+#         mppt_N_aux_battery_charging_ampers -> mppt_N_battery_current
+#         mppt_N_total_energy_generated -> mppt_N_power_generation_total
+#       UNIT FIX: power_generation_total is already kWh (old was Wh) - the
+#       /1000 divide is REMOVED, otherwise solar totals read 1000x low.
+#       UPGRADES: Battery Power now uses the shunt's NATIVE power sensor;
+#       Charge State uses the shunt's NATIVE charge_status (sign-agnostic).
+#       Capacity fallback 11776 -> 13372 Wh (real BMS full: 6683.8+6688.4).
+#       SOURCE SPLIT: solar = MPPTs, current/power/SOC/energy = 920Ah shunt,
+#       per-pack voltage/temp/cells/alarms = BMS battery_1/battery_2 (unchanged).
+#
+# v18 - Suspension balance + stance now computed from RULER HEIGHT %
+#       (sensor.camper_air_suspension_height_*) not corner PSI; Balance
+#       Threshold slider is now % (default 3). Pairs ESP v4.5.0.
+#
+# v17 - sensor.camper_public_ip (REST -> api.ipify.org, polled every
+#       30 min). WAN IP (sensor.camper_wan_ip) now shows the real PUBLIC
+#       internet IP, falling back to the interface IP if the lookup fails.
+#
+# v16 - GL.iNet integration-update fixes. The update REMOVED
+#       sensor.gl_inet_x3000_wan_ip; WAN Mode/Type + new sensor.
+#       camper_wan_ip now use cellular_wan_ipv4 + ethernet_1_status
+#       instead. Cell-signal gauge auto-switches source: repeater_signal
+#       (WiFi dBm) when on the repeater, cellular RSSI otherwise -> never
+#       blank. (Pairs with dashboard v66.)
+#
+# v15 - sensor.camper_weather: trigger-template that pulls the weather
+#       forecast (hourly/daily via the toggle) into a compact list for
+#       a one-line dashboard weather strip.
+#
+# v14 - input_boolean.camper_weather_hourly (toggle weather card
+#       hourly<->daily, default hourly).
+#
+# v13 - camper_internet binary_sensor: real online/offline from HA pinging
+#       a public IP (needs Ping integration to 1.1.1.1). Router-independent.
+#
+# v12 - WAN detection now also handles Ethernet/Starlink: uses WAN IP
+#       prefix (100.x=Starlink, 10.x=cellular) + ethernet_1 status,
+#       since the integration leaves cellular_network stale when
+#       cellular is disabled. Limits: integration cannot give the
+#       Ethernet WAN IP (stays "Unavailable" on Starlink).
+# v11 - WAN Mode/Type FIX: use repeater_CONNECTED (binary, "on") not
+#       repeater_status; name from repeater_ssid or the selected
+#       network (so "Repeater · MyWiFi" shows when repeating).
+# v10 - WAN Mode adds provider prefix ("Cellular · CARRIER",
+#       "Repeater · MyWiFi", "Starlink") + camper_wan_type for the icon.
+# v9 - WAN Mode names the actual source (superseded by v10).
+#
+# v8 - Cell signal now derived from cellular_signal (RSSI, always
+#      present, realistic) instead of RSRP (router under-reports it).
+#
+# v7 - Connectivity helpers for the new dashboard tab (human-readable):
+#      camper_cell_signal_pct (%) + camper_cell_rating (word) from
+#      RSRP+SINR; camper_wan_mode (Cellular 5G / WiFi Repeater / Offline);
+#      camper_wan_down_mbps / _up_mbps; camper_starlink_heading (compass
+#      from azimuth). No CPU/system metrics.
+#
+# v6 - Stored Energy now uses the ACTUAL BMS pack values
+#      (battery_1_stored_energy + battery_2_stored_energy) when both
+#      packs are online; falls back to the 920Ah x 12.8V x SOC estimate
+#      only if a pack is offline. Matches the real ~12,082 Wh.
+# v5 - Added system LOAD sensors: camper_load_current (A) and
+#      camper_load_power (W). Load = solar charge amps - battery amps
+#      (920Ah shunt, + = charging), clamped >= 0. Shows true draw.
+# Requires ESP air suspension config v2.0.0 (PSI presets moved
+# to the ESP - all HA-side gear logic removed).
+#
+# v4 - BATTERY SOURCE FIX. The battery_1_* / battery_2_* BMS
+#      integration is offline (all entities "unavailable"), so
+#      every template that summed them read 0 -> "Idle", "0 Wh",
+#      Battery Time Left "-". Re-sourced all battery math to the
+#      920Ah shunt (sensor.920ah_battery_*): ampers (+ = charging),
+#      battery_voltage, state_of_charge. Power = V x A. Stored
+#      energy + runtime derived from 920Ah x 12.8V nominal x SOC.
+# ============================================================
+
+homeassistant:
+  customize:
+    # v33 - the heater's own display tops out at 36 C, but the integration
+    # advertises max_temp 40, so the thermostat dial happily let you pick 40
+    # and the heater quietly dropped back to 36 later. Overriding the
+    # attribute makes the DIAL ITSELF stop at 36, so the wrong value can no
+    # longer be selected. (The clamp automation stays as a safety net in case
+    # the integration re-asserts its own limits after a reload.)
+    climate.diesel_heater:
+      max_temp: 36
+
+    # ---- Relay board icons (v34) ----
+    # Names come from the ESPHome config now, so only icons are set here.
+    # Physical relay number is in brackets - matches the cable tags and the
+    # id: fields in camper-relay-board_v2.1.0.yaml.
+    switch.relay_board_main_light:   # RE01
+      icon: mdi:ceiling-light
+    switch.relay_board_outdoor_left:   # RE02
+      icon: mdi:light-flood-down
+    switch.relay_board_bedroom_light:   # RE03
+      icon: mdi:lamp
+    switch.relay_board_front_outdoor:   # RE04
+      icon: mdi:light-flood-down
+    switch.relay_board_main_bedroom_red:   # RE05
+      icon: mdi:lightbulb-night
+    switch.relay_board_outdoor_right:   # RE06
+      icon: mdi:light-flood-down
+    switch.relay_board_fan:   # RE07
+      icon: mdi:fan
+    switch.relay_board_awning_red_left:   # RE08
+      icon: mdi:awning-outline
+    switch.relay_board_water_pump:   # RE09
+      icon: mdi:water-pump
+    switch.relay_board_awning_red_right:   # RE10
+      icon: mdi:awning-outline
+    switch.relay_board_inverter:   # RE11
+      icon: mdi:power-plug
+    switch.relay_board_inverter_led:   # RE12
+      icon: mdi:led-on
+    switch.relay_board_steps:   # RE13 - electric steps, own feed, ALWAYS_ON
+      icon: mdi:stairs
+    switch.relay_board_water_gauges:   # RE14
+      icon: mdi:gauge
+    switch.relay_board_stabilisers:   # RE15 - 90A contactor: corner jacks,
+      icon: mdi:screw-lag               # hitch jack, electric steps
+    switch.relay_board_tank_pipe_heater:   # RE16 - reserved, not wired yet
+      icon: mdi:snowflake-melt
+# ------------------------------------------------------------
+# INPUT HELPERS
+# ------------------------------------------------------------
+input_number:
+
+  # ---- v54: TRUE-CONTENTS TANK SCALE (litres) ----
+  # The relay board's own Clear/Grey Tank Empty/Full mV numbers are set to
+  # MATCH THE PANEL GAUGE, at the owner's choice. That scale is deliberately not
+  # the tank's real range: the panel gauge's 0% sits about 2 cm above a dry
+  # tank and its 100% is below overflow, so tank % CANNOT be multiplied out
+  # into litres. These four numbers carry the real dry/overflow voltages
+  # instead, and only the litres sensors below use them. Changing one of
+  # these never moves the percentage shown on the gauges.
+  #
+  # Confidence, so nobody trusts these more than they deserve:
+  #   grey dry  142 mV - MEASURED (and corroborated by an earlier 140 mV).
+  #   clear full 1318  - MEASURED with the tank overflowing.
+  #   clear dry  142   - ASSUMED. The clear tank has never been read dry;
+  #                      this borrows grey's sender figure. Fix it the next
+  #                      time the clear tank is drained.
+  #   grey full  1467  - EXTRAPOLATED from three points that stop at 46%.
+  #                      Over half that span is unverified. Replace it with a
+  #                      real overflow reading when you next fill grey.
+  camper_clear_dry_mv:
+    name: Clear Tank Dry mV (litres scale)
+    min: 0
+    max: 3000
+    step: 1
+    unit_of_measurement: mV
+    icon: mdi:cup-off-outline
+  camper_clear_full_mv:
+    name: Clear Tank Overflow mV (litres scale)
+    min: 0
+    max: 3000
+    step: 1
+    unit_of_measurement: mV
+    icon: mdi:cup-water
+  camper_grey_dry_mv:
+    name: Grey Tank Dry mV (litres scale)
+    min: 0
+    max: 3000
+    step: 1
+    unit_of_measurement: mV
+    icon: mdi:water-off-outline
+  camper_grey_full_mv:
+    name: Grey Tank Overflow mV (litres scale)
+    min: 0
+    max: 3000
+    step: 1
+    unit_of_measurement: mV
+    icon: mdi:water-opacity
+
+  # ---- v26: VIRTUAL DIESEL FUEL TANK ----
+  # The Vevor reports cumulative litres consumed but has no tank-level sensor,
+  # so the tank is tracked here: you enter how many litres are in it and press
+  # SET LEVEL, which snapshots the heater's running total. Remaining is then
+  # entered_litres - (total_now - snapshot). Handles partial fills.
+  # v29 - internal trackers only (set by script.camper_set_fuel_level).
+  # No "initial:" - HA resets an input_number to it on every restart, which
+  # would wipe the baseline and break the gauge.
+  camper_fuel_start_litres:
+    name: Fuel Start Litres
+    min: 0
+    max: 60
+    step: 0.01
+    unit_of_measurement: "L"
+    icon: mdi:database-marker
+    mode: box
+  camper_fuel_baseline:
+    name: Fuel Consumed Baseline
+    min: 0
+    max: 100000
+    step: 0.001
+    unit_of_measurement: "L"
+    icon: mdi:database-marker
+    mode: box
+
+  # v32 - which gear was just pressed but not yet confirmed by the heater.
+  # 0 = nothing pending. Drives the blinking gear button.
+  camper_pending_gear:
+    name: Pending Gear
+    min: 0
+    max: 10
+    step: 1
+    icon: mdi:timer-sand
+
+  # ---- suspension balance threshold ----
+  camper_balance_threshold:
+    name: Balance Threshold
+    min: 0
+    max: 10
+    step: 0.5
+    unit_of_measurement: "%"
+    icon: mdi:scale-balance
+    initial: 3
+
+# ------------------------------------------------------------
+# TEMPLATE SENSORS
+# ------------------------------------------------------------
+# v29 - DROPDOWN for the fuel level (0 - 10 L in 0.5 L steps). Tank CAPACITY
+# comes from the heater's own select.diesel_heater_tank_volume dropdown, so
+# there is no duplicate capacity helper to keep in sync.
+input_select:
+  camper_fuel_tank_capacity:
+    name: Fuel Tank Capacity
+    icon: mdi:propane-tank
+    options:
+      - "5 L"
+      - "8 L"
+      - "10 L"
+      - "12 L"
+      - "15 L"
+      - "20 L"
+      - "25 L"
+      - "30 L"
+  camper_fuel_level:
+    name: Litres In Tank Now
+    icon: mdi:fuel
+    options:
+      - "0.0 L"
+      - "0.5 L"
+      - "1.0 L"
+      - "1.5 L"
+      - "2.0 L"
+      - "2.5 L"
+      - "3.0 L"
+      - "3.5 L"
+      - "4.0 L"
+      - "4.5 L"
+      - "5.0 L"
+      - "5.5 L"
+      - "6.0 L"
+      - "6.5 L"
+      - "7.0 L"
+      - "7.5 L"
+      - "8.0 L"
+      - "8.5 L"
+      - "9.0 L"
+      - "9.5 L"
+      - "10.0 L"
+
+input_boolean:
+  # v52 - gate for the Suspension Settings / Mode Preset sliders. While OFF
+  # the cards stay fully VISIBLE (you can read every value) but are inert -
+  # card-mod sets pointer-events: none - so a stray finger on the tablet
+  # cannot drag Max Corner PSI or a mode target. No "initial:" on purpose:
+  # an input_boolean with initial: is forced back on every HA restart, and
+  # this must come up LOCKED.
+  camper_settings_unlock:
+    name: Suspension Settings Unlocked
+    icon: mdi:lock-open-variant
+
+  # weather card mode toggle: on = hourly (default), off = daily
+  camper_weather_hourly:
+    name: Weather Hourly
+    icon: mdi:clock-outline
+    initial: true
+
+# ---- Public internet IP (REST, polled every 30 min) ----
+sensor:
+  - platform: rest
+    name: "Camper Public IP"
+    unique_id: camper_public_ip
+    resource: https://api.ipify.org
+    scan_interval: 1800
+    timeout: 15
+
+template:
+  # v15: fetch weather forecast (hourly/daily per the toggle) into a
+  # sensor with a compact list, so the dashboard can render a 1-line strip.
+  - trigger:
+      - platform: homeassistant
+        event: start
+      - platform: time_pattern
+        minutes: "/15"
+      - platform: state
+        entity_id: input_boolean.camper_weather_hourly
+    action:
+      - service: weather.get_forecasts
+        target:
+          entity_id: weather.forecast_home
+        data:
+          type: "{{ 'hourly' if is_state('input_boolean.camper_weather_hourly','on') else 'daily' }}"
+        response_variable: fc
+    sensor:
+      - name: "Camper Weather"
+        unique_id: camper_weather
+        state: "{{ states('weather.forecast_home') }}"
+        attributes:
+          temp: "{{ state_attr('weather.forecast_home','temperature') }}"
+          mode: "{{ 'hourly' if is_state('input_boolean.camper_weather_hourly','on') else 'daily' }}"
+          forecast: "{{ (fc['weather.forecast_home']['forecast'] | default([]))[:6] }}"
+
+  - binary_sensor:
+      # ---- v13: real internet reachability from HA itself ----
+      # Independent of the GL.iNet integration. Requires the Ping
+      # integration added to a public IP (Settings > Devices & Services >
+      # Add Integration > Ping > host 1.1.1.1). That creates
+      # binary_sensor.1_1_1_1 -> change the entity below if yours differs.
+      - name: "Camper Internet"
+        unique_id: camper_internet
+        device_class: connectivity
+        state: "{{ is_state('binary_sensor.1_1_1_1', 'on') }}"
+        availability: "{{ states('binary_sensor.1_1_1_1') not in ['unknown','unavailable'] }}"
+
+      # ---- v3: scene-active indicators (light up scene keys) ----
+      # ============== SCENES (v34) ==============
+      # Rebuilt on the real relay map. "Lights" is the EIGHT lighting relays
+      # only - the old version looped relays 1..10, which on the corrected map
+      # would have swept the Fan (RE07) and Water Pump (RE09) in with them.
+      - name: "Camper Scene All On"
+        unique_id: camper_scene_all_on
+        icon: mdi:lightbulb-group
+        state: >
+          {{ is_state('switch.relay_board_main_light', 'on') and
+             is_state('switch.relay_board_outdoor_left', 'on') and
+             is_state('switch.relay_board_bedroom_light', 'on') and
+             is_state('switch.relay_board_front_outdoor', 'on') and
+             is_state('switch.relay_board_main_bedroom_red', 'on') and
+             is_state('switch.relay_board_outdoor_right', 'on') and
+             is_state('switch.relay_board_awning_red_left', 'on') and
+             is_state('switch.relay_board_awning_red_right', 'on') }}
+
+      - name: "Camper Scene All Off"
+        unique_id: camper_scene_all_off
+        icon: mdi:lightbulb-group-off
+        state: >
+          {{ is_state('switch.relay_board_main_light', 'off') and
+             is_state('switch.relay_board_outdoor_left', 'off') and
+             is_state('switch.relay_board_bedroom_light', 'off') and
+             is_state('switch.relay_board_front_outdoor', 'off') and
+             is_state('switch.relay_board_main_bedroom_red', 'off') and
+             is_state('switch.relay_board_outdoor_right', 'off') and
+             is_state('switch.relay_board_awning_red_left', 'off') and
+             is_state('switch.relay_board_awning_red_right', 'off') }}
+
+      - name: "Camper Scene Exterior On"
+        unique_id: camper_scene_exterior_on
+        icon: mdi:lightbulb-group
+        state: >
+          {{ is_state('switch.relay_board_front_outdoor', 'on') and
+             is_state('switch.relay_board_outdoor_left', 'on') and
+             is_state('switch.relay_board_outdoor_right', 'on') }}
+
+      # Night mode: the interior red on, every white light off.
+      - name: "Camper Scene Night Mode"
+        unique_id: camper_scene_night_mode
+        icon: mdi:weather-night
+        state: >
+          {{ is_state('switch.relay_board_main_bedroom_red', 'on') and
+             is_state('switch.relay_board_main_light', 'off') and
+             is_state('switch.relay_board_bedroom_light', 'off') and
+             is_state('switch.relay_board_front_outdoor', 'off') and
+             is_state('switch.relay_board_outdoor_left', 'off') and
+             is_state('switch.relay_board_outdoor_right', 'off') }}
+
+      # Stealth: all three reds on (interior + both awnings).
+      - name: "Camper Scene Stealth"
+        unique_id: camper_scene_stealth
+        icon: mdi:incognito
+        state: >
+          {{ is_state('switch.relay_board_main_bedroom_red', 'on') and
+             is_state('switch.relay_board_awning_red_left', 'on') and
+             is_state('switch.relay_board_awning_red_right', 'on') }}
+
+  - sensor:
+      # ================= ENERGY =================
+      - name: "Camper Battery SOC"
+        unique_id: camper_battery_soc
+        unit_of_measurement: "%"
+        device_class: battery
+        state_class: measurement
+        state: >
+          {# v35: BOTH banks -> BMS average. EITHER bank missing -> 920Ah shunt. #}
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set b1 = states('sensor.battery_1_battery') %}
+          {% set b2 = states('sensor.battery_2_battery') %}
+          {% set sh = states('sensor.920ah_battery_pack_state_of_charge') %}
+          {% if b1 not in bad and b2 not in bad %}
+            {{ ((b1 | float(0) + b2 | float(0)) / 2) | round(1) }}
+          {% elif sh not in bad %}
+            {{ sh | float(0) | round(1) }}
+          {% endif %}
+        availability: >
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set both = states('sensor.battery_1_battery') not in bad
+                     and states('sensor.battery_2_battery') not in bad %}
+          {{ both or states('sensor.920ah_battery_pack_state_of_charge') not in bad }}
+
+      # v4: all battery math now reads the 920Ah shunt.
+      # BMS pack current is signed, + = charging, - = discharging.
+      - name: "Camper Battery Power"
+        unique_id: camper_battery_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {# v35: BOTH -> sum of native BMS power. EITHER missing -> the shunt has
+             NO power sensor, so power is derived as amps x volts. #}
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set x1 = states('sensor.battery_1_power') %}
+          {% set x2 = states('sensor.battery_2_power') %}
+          {% set sa = states('sensor.920ah_battery_pack_ampers') %}
+          {% set sv = states('sensor.920ah_battery_pack_battery_voltage') %}
+          {% if x1 not in bad and x2 not in bad %}
+            {{ (x1 | float(0) + x2 | float(0)) | round(0) }}
+          {% elif sa not in bad and sv not in bad %}
+            {{ (sa | float(0) * sv | float(0)) | round(0) }}
+          {% endif %}
+        availability: >
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set both = states('sensor.battery_1_power') not in bad
+                     and states('sensor.battery_2_power') not in bad %}
+          {{ both or (states('sensor.920ah_battery_pack_ampers') not in bad
+                    and states('sensor.920ah_battery_pack_battery_voltage') not in bad) }}
+
+      - name: "Camper Battery Current"
+        unique_id: camper_battery_current
+        unit_of_measurement: "A"
+        device_class: current
+        state_class: measurement
+        state: >
+          {# v35: current is SUMMED, so ONE missing bank would silently halve it.
+             BOTH -> sum. EITHER missing -> shunt amps. Sign assumed + = charging. #}
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set x1 = states('sensor.battery_1_current') %}
+          {% set x2 = states('sensor.battery_2_current') %}
+          {% set sh = states('sensor.920ah_battery_pack_ampers') %}
+          {% if x1 not in bad and x2 not in bad %}
+            {{ (x1 | float(0) + x2 | float(0)) | round(2) }}
+          {% elif sh not in bad %}
+            {{ sh | float(0) | round(2) }}
+          {% endif %}
+        availability: >
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set both = states('sensor.battery_1_current') not in bad
+                     and states('sensor.battery_2_current') not in bad %}
+          {{ both or states('sensor.920ah_battery_pack_ampers') not in bad }}
+
+      # v24: pack voltage from the BMS banks (parallel -> average), shunt as
+      # fallback. Replaces the dashboard's direct use of the Renogy shunt.
+      - name: "Camper Battery Voltage"
+        unique_id: camper_battery_voltage
+        unit_of_measurement: "V"
+        device_class: voltage
+        state_class: measurement
+        state: >
+          {# v35: BOTH banks -> BMS average. EITHER missing -> 920Ah shunt. #}
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set v1 = states('sensor.battery_1_voltage') %}
+          {% set v2 = states('sensor.battery_2_voltage') %}
+          {% set sh = states('sensor.920ah_battery_pack_battery_voltage') %}
+          {% if v1 not in bad and v2 not in bad %}
+            {{ ((v1 | float(0) + v2 | float(0)) / 2) | round(2) }}
+          {% elif sh not in bad %}
+            {{ sh | float(0) | round(2) }}
+          {% endif %}
+        availability: >
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set both = states('sensor.battery_1_voltage') not in bad
+                     and states('sensor.battery_2_voltage') not in bad %}
+          {{ both or states('sensor.920ah_battery_pack_battery_voltage') not in bad }}
+
+      # v6: prefer the ACTUAL stored Wh reported by the two BMS packs
+      # (accurate). Fall back to the 920Ah x 12.8V x SOC estimate (11776 Wh
+      # full) only if either BMS pack is offline/unavailable.
+      - name: "Camper Stored Energy"
+        unique_id: camper_stored_energy
+        unit_of_measurement: "Wh"
+        device_class: energy_storage
+        state_class: measurement
+        state: >
+          {# v35: BOTH -> sum. EITHER missing -> shunt has no stored-energy sensor,
+             so derive from shunt SOC against 11776 Wh (920Ah x 12.8V). Keeps
+             Runtime Estimate alive during a fallback instead of blanking it. #}
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set b1 = states('sensor.battery_1_stored_energy') %}
+          {% set b2 = states('sensor.battery_2_stored_energy') %}
+          {% set sh = states('sensor.920ah_battery_pack_state_of_charge') %}
+          {% if b1 not in bad and b2 not in bad %}
+            {{ (b1 | float(0) + b2 | float(0)) | round(0) }}
+          {% elif sh not in bad %}
+            {{ (11776 * sh | float(0) / 100) | round(0) }}
+          {% endif %}
+
+      - name: "Camper Charge State"
+        unique_id: camper_charge_state
+        state: >
+          {# v25: BMS ONLY - sign of the summed pack current (+ = charging). #}
+          {% set a = states('sensor.camper_battery_current') | float(0) %}
+          {% if a > 0.5 %}Charging{% elif a < -0.5 %}Discharging{% else %}Idle{% endif %}
+        availability: >
+          {{ states('sensor.camper_battery_current') not in ['unknown','unavailable','none',''] }}
+
+      - name: "Camper Charge Display"
+        unique_id: camper_charge_display
+        icon: >
+          {% set a = states('sensor.camper_battery_current') | float(0) %}
+          {{ 'mdi:battery-charging' if a > 0.5 else
+             'mdi:battery-arrow-down' if a < -0.5 else 'mdi:battery' }}
+        state: >
+          {# v58: reads the bank sum directly. The v22 15 s smoothing is gone -
+             the BMS only updates every 30 s, so it added delay, not calm. #}
+          {% set a = states('sensor.camper_battery_current') | float(0) %}
+          {% set w = states('sensor.camper_battery_power') | float(0) %}
+          {% set st = states('sensor.camper_charge_state') %}
+          {% if st == 'Charging' %}Charging {{ a | abs | round(1) }}A {{ w | abs | round(0) }}W
+          {% elif st == 'Discharging' %}Discharging {{ a | abs | round(1) }}A {{ w | abs | round(0) }}W
+          {% else %}Idle{% endif %}
+
+      # v4: capacity fixed at 11776 Wh (920Ah x 12.8V).
+      # discharging -> time to empty; charging -> time to full.
+      - name: "Camper Runtime Estimate"
+        unique_id: camper_runtime_estimate
+        unit_of_measurement: "h"
+        state_class: measurement
+        state: >
+          {% set a = states('sensor.camper_battery_current') | float(0) %}
+          {% set v = states('sensor.camper_battery_voltage') | float(12.8) %}
+          {% set soc = states('sensor.camper_battery_soc') | float(0) %}
+          {% set cap = states('sensor.camper_stored_energy') | float(0) / ([states('sensor.camper_battery_soc') | float(1), 1] | max) * 100 %}
+          {% set stored = cap * soc / 100 %}
+          {% set p = v * a %}
+          {% if a < -0.5 %}
+            {{ (stored / (p | abs)) | round(1) }}
+          {% elif a > 0.5 and soc < 99.5 %}
+            {{ (cap * (1 - soc / 100) / p) | round(1) }}
+          {% else %}
+            0
+          {% endif %}
+
+      - name: "Camper Runtime Display"
+        unique_id: camper_runtime_display
+        icon: mdi:timer-outline
+        state: >
+          {% set a = states('sensor.camper_battery_current') | float(0) %}
+          {% set soc = states('sensor.camper_battery_soc') | float(0) %}
+          {% set h = states('sensor.camper_runtime_estimate') | float(0) %}
+          {% if soc >= 99.5 and states('sensor.camper_charge_state') != 'Discharging' %}
+            Full
+          {% elif h <= 0 %}
+            —
+          {% else %}
+            {% set d = (h // 24) | int %}
+            {% set r = (h - d * 24) | round(0) | int %}
+            {% set txt = (d ~ 'd ' ~ r ~ 'h') if d > 0 else (h | round(1) ~ ' h') %}
+            {{ (txt ~ ' to full') if a > 0.5 else txt }}
+          {% endif %}
+
+      - name: "Camper Solar Power"
+        unique_id: camper_solar_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {{ (states('sensor.mppt_1_440w_current_solar_watts') | float(0)
+            + states('sensor.mppt_2_880w_current_solar_watts') | float(0)) | round(0) }}
+
+      # v5: real system load at the battery bus.
+      # Load = solar charge current - battery current (920Ah ampers, + = charging).
+      # Discharging -> battery adds to load; charging -> battery subtracts.
+      - name: "Camper Load Current"
+        unique_id: camper_load_current
+        unit_of_measurement: "A"
+        device_class: current
+        state_class: measurement
+        state: >
+          {# v44: use the SMOOTHED battery current, the same value the Energy
+             tile's "Discharging/Charging" line reads. Previously this used the
+             raw sensor while that line used the smoothed one, so the two rows
+             of the same tile disagreed by a few tenths of an amp - both were
+             correct, they were just filtered differently, which looks like a
+             fault. Falls back to raw if the filter sensor is unavailable
+             (e.g. right after a restart, before the 15s window has filled). #}
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set solar = states('sensor.mppt_1_440w_aux_battery_charging_ampers') | float(0)
+                       + states('sensor.mppt_2_880w_aux_battery_charging_ampers') | float(0) %}
+          {# v58: smoothing removed - same raw value the Charge Display uses,
+             so the two rows of the tile still agree (the v44 point). #}
+          {% set batt = states('sensor.camper_battery_current') | float(0) %}
+          {{ [ (solar - batt), 0 ] | max | round(1) }}
+        availability: >
+          {{ states('sensor.camper_battery_current') not in ['unknown','unavailable'] }}
+
+      - name: "Camper Load Power"
+        unique_id: camper_load_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        state: >
+          {% set a = states('sensor.camper_load_current') | float(0) %}
+          {% set v = states('sensor.camper_battery_voltage') | float(12.8) %}
+          {{ (a * v) | round(0) }}
+
+      # ============== CONNECTIVITY (v7) ==============
+      # Cellular signal as a human 0-100% from RSRP (bars) lifted by SINR
+      # (good SNR shouldn't read weak). -110..-75 dBm -> 0..100%.
+      # v47: CELLULAR ONLY, from RSRP + SINR.
+      # The old version switched to the WI-FI REPEATER signal whenever the
+      # repeater was connected, so a tile labelled "Cell Signal" was showing
+      # Wi-Fi strength - it has never displayed cellular while repeating.
+      # The cellular branch was also mis-scaled: (RSSI+100)/40 maps -60 dBm to
+      # 100%, so anything better than -60 pinned the gauge (measured 105% at
+      # -58). The repeater link now has its own sensor below.
+      #
+      # RSRP is the real LTE/5G power measure and SINR the quality measure;
+      # RSSI lumps in noise and interference, which is why it reads optimistic.
+      #   RSRP -110..-75 dBm -> 0..100      SINR -5..+20 dB -> 0..100
+      # Weighted 70/30 toward RSRP: you need power first, then clean signal.
+      - name: "Camper Cell Signal"
+        unique_id: camper_cell_signal_pct
+        unit_of_measurement: "%"
+        icon: mdi:signal
+        state: >
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set rsrp = states('sensor.gl_inet_x3000_cellular_rsrp') %}
+          {% set sinr = states('sensor.gl_inet_x3000_cellular_sinr') %}
+          {% if rsrp not in bad %}
+            {% set rp = [ [ (rsrp | float(-110) + 110) / 35 * 100, 0 ] | max, 100 ] | min %}
+            {% if sinr not in bad %}
+              {% set sp = [ [ (sinr | float(-5) + 5) / 25 * 100, 0 ] | max, 100 ] | min %}
+              {{ (0.7 * rp + 0.3 * sp) | round(0) }}
+            {% else %}
+              {{ rp | round(0) }}
+            {% endif %}
+          {% else %}
+            {# no RSRP -> fall back to RSSI on a realistic -100..-55 scale #}
+            {% set d = states('sensor.gl_inet_x3000_cellular_rssi') | float(-120) %}
+            {{ [ [ (d + 100) / 45 * 100, 0 ] | max, 100 ] | min | round(0) }}
+          {% endif %}
+        availability: >
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {{ states('sensor.gl_inet_x3000_cellular_rsrp') not in bad
+             or states('sensor.gl_inet_x3000_cellular_rssi') not in bad }}
+
+      # v47: the repeater link, as its OWN sensor instead of impersonating the
+      # cellular one. Wi-Fi scale -85..-45 dBm -> 0..100.
+      - name: "Camper Repeater Signal"
+        unique_id: camper_repeater_signal_pct
+        unit_of_measurement: "%"
+        icon: mdi:wifi
+        state: >
+          {% set d = states('sensor.gl_inet_x3000_repeater_signal') | float(-120) %}
+          {{ [ [ (d + 85) / 40 * 100, 0 ] | max, 100 ] | min | round(0) }}
+        availability: >
+          {{ states('sensor.gl_inet_x3000_repeater_signal') not in ['unknown','unavailable','none','']
+             and is_state('binary_sensor.gl_inet_x3000_repeater_connected','on') }}
+
+      # Plain-word rating (Excellent/Good/Fair/Poor) from the % above.
+      # v48: availability guard. Without it an unavailable Cell Signal became
+      # float(0) and this reported a confident "Poor" - a missing reading
+      # rendered as a bad one, which is worse than showing nothing. Happens on
+      # every package reload and any router hiccup.
+      # v56: THE REASON THE CELL TILE WENT BLANK. Checked against 24h of
+      # history on the live router: the modem dropped from NR5G-NSA to WCDMA,
+      # and at that exact moment RSRP, RSRQ, SINR *and* RSSI all went
+      # "unknown" together. On 3G this router publishes no signal metric at
+      # all, so Cell Signal correctly had nothing to report and this rating
+      # - which depends on it - went unavailable with it. The link itself was
+      # fine the whole time (status Up, CARRIER, IP assigned).
+      # So: stay AVAILABLE whenever the cellular status is known, and say
+      # which of the three situations it is instead of showing nothing.
+      # "No Data" means connected but the modem is not reporting strength -
+      # it does NOT mean a weak signal.
+      - name: "Camper Cell Rating"
+        unique_id: camper_cell_rating
+        icon: mdi:signal-cellular-3
+        state: >
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% set sig = states('sensor.camper_cell_signal') %}
+          {% set st  = states('sensor.gl_inet_x3000_cellular_status') %}
+          {% if sig not in bad %}
+            {% set p = sig | float(0) %}
+            {% if p >= 75 %}Excellent
+            {% elif p >= 50 %}Good
+            {% elif p >= 25 %}Fair
+            {% else %}Poor{% endif %}
+          {% elif st | lower == 'up' %}
+            No Data
+          {% else %}
+            Offline
+          {% endif %}
+        availability: >
+          {{ states('sensor.gl_inet_x3000_cellular_status')
+             not in ['unknown','unavailable','none',''] }}
+
+      # Which WAN the router is actually using.
+      # v10: WAN source with provider. Repeater -> "Repeater · <ssid>"
+      # (or "Starlink" if the repeated network is Starlink); cellular ->
+      # "Cellular · <network>" (e.g. CARRIER); else Offline.
+      - name: "Camper WAN Mode"
+        unique_id: camper_wan_mode
+        icon: mdi:wan
+        state: >
+          {% set rep = states('binary_sensor.gl_inet_x3000_repeater_connected') %}
+          {% set ssid = states('sensor.gl_inet_x3000_repeater_ssid') %}
+          {% set sel = states('select.gl_inet_x3000_wifi_network') %}
+          {% set eth = states('sensor.gl_inet_x3000_ethernet_1_status') %}
+          {% set cip = states('sensor.gl_inet_x3000_cellular_wan_ipv4') %}
+          {% set cst = states('sensor.gl_inet_x3000_cellular_status') %}
+          {% set net = states('sensor.gl_inet_x3000_cellular_network') %}
+          {% set bad = ['unknown','unavailable','none','','-- select network --'] %}
+          {% set rname = ssid if ssid | lower not in bad else sel %}
+          {# v47: cellular lines now carry the BAND (e.g. "· 5G"). The band
+             entity did not exist when this was written - dashboard v40 notes
+             "no Band" for exactly that reason. NR5G-* = 5G, LTE* = 4G. #}
+          {% set bnd = states('sensor.gl_inet_x3000_cellular_band') %}
+          {% set gen = ' · 5G' if 'NR5G' in bnd else (' · 4G' if 'LTE' in bnd else '') %}
+          {% if rep == 'on' %}
+            {% if rname | lower not in bad and 'starlink' in rname | lower %}Starlink
+            {% elif rname | lower not in bad %}Repeater · {{ rname }}
+            {% else %}Wi-Fi Repeater{% endif %}
+          {% elif eth == 'Up' %}Starlink
+          {% elif cst == 'Up' and cip.startswith('10.') %}Cellular · {{ net }}{{ gen }}
+          {% elif net | lower not in bad %}Cellular · {{ net }}{{ gen }}
+          {% else %}Offline{% endif %}
+
+      # Machine type for picking the WAN icon: starlink/repeater/cellular/offline
+      - name: "Camper WAN Type"
+        unique_id: camper_wan_type
+        icon: mdi:wan
+        state: >
+          {% set rep = states('binary_sensor.gl_inet_x3000_repeater_connected') %}
+          {% set ssid = states('sensor.gl_inet_x3000_repeater_ssid') %}
+          {% set sel = states('select.gl_inet_x3000_wifi_network') %}
+          {% set eth = states('sensor.gl_inet_x3000_ethernet_1_status') %}
+          {% set cip = states('sensor.gl_inet_x3000_cellular_wan_ipv4') %}
+          {% set cst = states('sensor.gl_inet_x3000_cellular_status') %}
+          {% set net = states('sensor.gl_inet_x3000_cellular_network') %}
+          {% set bad = ['unknown','unavailable','none','','-- select network --'] %}
+          {% set rname = ssid if ssid | lower not in bad else sel %}
+          {% if rep == 'on' %}
+            {% if rname | lower not in bad and 'starlink' in rname | lower %}starlink
+            {% else %}repeater{% endif %}
+          {% elif eth == 'Up' %}starlink
+          {% elif cst == 'Up' and cip.startswith('10.') %}cellular
+          {% elif net | lower not in bad %}cellular
+          {% else %}offline{% endif %}
+
+      # v16: active WAN IP - repeater upstream IP when repeating, else the
+      # cellular WAN IPv4 (the integration no longer exposes a single wan_ip).
+      - name: "Camper WAN IP"
+        unique_id: camper_wan_ip
+        icon: mdi:ip-network
+        state: >
+          {% set pub = states('sensor.camper_public_ip') %}
+          {% set bad = ['unknown','unavailable','none',''] %}
+          {% if pub not in bad %}{{ pub }}
+          {% else %}
+            {% set rep = states('binary_sensor.gl_inet_x3000_repeater_connected') %}
+            {% if rep == 'on' %}{{ states('sensor.gl_inet_x3000_repeater_ip_address') }}
+            {% else %}{{ states('sensor.gl_inet_x3000_cellular_wan_ipv4') }}{% endif %}
+          {% endif %}
+
+      # Live WAN throughput in Mbps (router reports B/s).
+      - name: "Camper WAN Down"
+        unique_id: camper_wan_down_mbps
+        unit_of_measurement: "Mbps"
+        icon: mdi:download
+        state: >
+          {# v49: round(3) not round(2). Typical trailer traffic is a few
+             hundred B/s: 860 B/s = 0.0069 Mbps, which round(2) flattened to
+             0.01 or straight to 0.0 - the number was being destroyed before
+             anything could display it. 3 decimals keeps kbps resolution. #}
+          {{ (states('sensor.gl_inet_x3000_wan_download_rate') | float(0) * 8 / 1000000) | round(3) }}
+
+      - name: "Camper WAN Up"
+        unique_id: camper_wan_up_mbps
+        unit_of_measurement: "Mbps"
+        icon: mdi:upload
+        state: >
+          {# v49: round(3) not round(2). Typical trailer traffic is a few
+             hundred B/s: 860 B/s = 0.0069 Mbps, which round(2) flattened to
+             0.01 or straight to 0.0 - the number was being destroyed before
+             anything could display it. 3 decimals keeps kbps resolution. #}
+          {{ (states('sensor.gl_inet_x3000_wan_upload_rate') | float(0) * 8 / 1000000) | round(3) }}
+
+      # Starlink dish aim: azimuth degrees -> 16-point compass heading.
+      - name: "Camper Starlink Heading"
+        unique_id: camper_starlink_heading
+        icon: mdi:compass
+        state: >
+          {% set az = states('sensor.starlink_azimuth') | float(0) %}
+          {% set a = (az % 360 + 360) % 360 %}
+          {% set d = ['N','NNE','NE','ENE','E','ESE','SE','SSE','S','SSW','SW','WSW','W','WNW','NW','NNW'] %}
+          {{ d[ ((a / 22.5) | round(0) | int) % 16 ] }}
+
+      - name: "Camper Solar Energy Total"
+        unique_id: camper_solar_energy_total
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        state: >
+          {# v24: the CLOUD integration reports total_energy_generated in Wh
+             (3702 + 27319), so divide by 1000 for kWh. #}
+          {{ ((states('sensor.mppt_1_440w_total_energy_generated') | float(0)
+             + states('sensor.mppt_2_880w_total_energy_generated') | float(0)) / 1000)
+             | round(2) }}
+        availability: >
+          {{ states('sensor.mppt_1_440w_total_energy_generated') not in ['unknown','unavailable']
+             and states('sensor.mppt_2_880w_total_energy_generated') not in ['unknown','unavailable'] }}
+
+      # ================= DIESEL HEATER / FUEL (v26) =================
+      - name: "Camper Fuel Remaining"
+        unique_id: camper_fuel_remaining
+        unit_of_measurement: "L"
+        icon: mdi:fuel
+        state_class: measurement
+        state: >
+          {% set tv    = states('input_select.camper_fuel_tank_capacity') %}
+          {% set cap   = (tv.split(' ')[0] | float(10)) if (tv is string and tv[:1].isdigit()) else 10 %}
+          {% set start = states('input_number.camper_fuel_start_litres')  | float(0) %}
+          {% set base  = states('input_number.camper_fuel_baseline')      | float(0) %}
+          {% set tot   = states('sensor.diesel_heater_estimated_total_fuel_consumed') | float(-1) %}
+          {% if tot < 0 %}
+            {{ start | round(2) }}
+          {% elif tot < base %}
+            {# heater's cumulative counter was reset - hold last known rather
+               than show a jump. Press SET LEVEL to re-baseline. #}
+            {{ start | round(2) }}
+          {% else %}
+            {{ [ [ start - (tot - base), 0 ] | max, cap ] | min | round(2) }}
+          {% endif %}
+
+      - name: "Camper Fuel Remaining Percent"
+        unique_id: camper_fuel_remaining_pct
+        unit_of_measurement: "%"
+        icon: mdi:gauge
+        state_class: measurement
+        state: >
+          {% set tv  = states('input_select.camper_fuel_tank_capacity') %}
+          {% set cap = (tv.split(' ')[0] | float(10)) if (tv is string and tv[:1].isdigit()) else 10 %}
+          {% set rem = states('sensor.camper_fuel_remaining') | float(0) %}
+          {{ (0 if cap <= 0 else [ [ rem / cap * 100, 0 ] | max, 100 ] | min) | round(0) }}
+
+      # Hours of heat left at the CURRENT burn rate. Blank when the heater is
+      # idle (no meaningful rate to divide by).
+      - name: "Camper Heat Hours Left"
+        unique_id: camper_heat_hours_left
+        unit_of_measurement: "h"
+        icon: mdi:timer-sand
+        state: >
+          {% set rem  = states('sensor.camper_fuel_remaining') | float(0) %}
+          {% set rate = states('sensor.diesel_heater_estimated_hourly_fuel_consumption') | float(0) %}
+          {{ (rem / rate) | round(1) }}
+        availability: >
+          {{ states('sensor.diesel_heater_estimated_hourly_fuel_consumption') | float(0) > 0.02 }}
+
+      - name: "Camper Heat Time Left"
+        unique_id: camper_heat_time_left
+        icon: mdi:timer-sand
+        state: >
+          {% set h = states('sensor.camper_heat_hours_left') %}
+          {% if h in ['unknown','unavailable','none',''] %}
+            Idle
+          {% else %}
+            {% set hh = h | float(0) %}
+            {% if hh >= 24 %}{{ (hh // 24) | int }}d {{ (hh - (hh // 24) * 24) | round(0) | int }}h
+            {% else %}{{ hh | round(1) }} h{% endif %}
+          {% endif %}
+
+      # ============== GLOBAL ALERTS (v40) ==============
+      # One place defines every alert. The dashboard renders this on EVERY tab,
+      # so a fault raised on Suspension is visible while you are on Cameras.
+      # Adding or changing an alert = edit ONLY this block; the 8 dashboard
+      # cards just print what it produces.
+      #
+      # State is the COUNT (a sensor state is capped at 255 chars, so the text
+      # lives in the 'lines' attribute). Each line names its tab so you know
+      # where to go.
+      - name: "Camper Alert Summary"
+        unique_id: camper_alert_summary
+        icon: mdi:alert-circle-outline
+        state: "{{ state_attr('sensor.camper_alert_summary','lines') | default([], true) | count }}"
+        attributes:
+          lines: >
+            {% set bad = ['unknown','unavailable','none',''] %}
+            {% set ns = namespace(a = []) %}
+
+            {# ---- DEVICES OFFLINE ----
+               Listed first on purpose: if a board is down, several other
+               alerts below will also be quiet because their sensors are
+               unavailable, so this is the one that explains the rest.
+               An ESPHome device going offline makes ALL its entities
+               'unavailable' - so one representative entity per board is
+               enough to detect it. #}
+            {% if states('switch.relay_board_main_light') in bad %}
+              {% set ns.a = ns.a + ['🔴 **RELAY BOARD OFFLINE** — all lights, water pump, inverter and tank gauges are unreachable. Check power and the ethernet cable.  ·  *Lighting tab*'] %}
+            {% endif %}
+            {% if states('sensor.camper_air_suspension_air_tank') in bad %}
+              {% set ns.a = ns.a + ['🔴 **AIR SUSPENSION BOARD OFFLINE** — no height, pressure or levelling control. Do not rely on the suspension readings.  ·  *Suspension tab*'] %}
+            {% endif %}
+
+            {# ---- CLIMATE ---- #}
+            {% if is_state('binary_sensor.diesel_heater_problem','on') %}
+              {% set ns.a = ns.a + ['🔴 **DIESEL HEATER FAULT** — ' ~ states('sensor.diesel_heater_error') ~ '  ·  *Climate tab*'] %}
+            {% endif %}
+            {% if is_state('binary_sensor.diesel_heater_connected','off') %}
+              {% set ns.a = ns.a + ['🟠 **HEATER BLUETOOTH DISCONNECTED** — controls will not respond until the link is back. Reconnect from the Vevor app if needed.  ·  *Climate tab*'] %}
+            {% endif %}
+
+            {# ---- SUSPENSION ---- #}
+            {% if is_state('binary_sensor.camper_air_suspension_air_bag_overpressure','on') %}
+              {% set ns.a = ns.a + ['🔴 **AIR BAG OVERPRESSURE**  ·  *Suspension tab*'] %}
+            {% endif %}
+            {% if is_state('binary_sensor.camper_air_suspension_air_bag_underpressure','on') %}
+              {% set ns.a = ns.a + ['🟠 **AIR BAG UNDERPRESSURE**  ·  *Suspension tab*'] %}
+            {% endif %}
+            {% set tank = states('sensor.camper_air_suspension_air_tank') | float(-1) %}
+            {% if tank >= 0 and tank < 90 %}
+              {% set ns.a = ns.a + ['🟠 **LOW AIR TANK PRESSURE** — below 90 psi (compressor cuts in at 110)  ·  *Suspension tab*'] %}
+            {% endif %}
+            {% if tank > 155 %}
+              {% set ns.a = ns.a + ['🔴 **AIR TANK OVERPRESSURE** — above 155 psi (working max 150, safety valve 175)  ·  *Suspension tab*'] %}
+            {% endif %}
+
+            {# ---- ENERGY ----
+               float(-1) so a missing SOC cannot read as 0 and fire a false
+               alarm: the alert needs a real reading between 0 and 20. #}
+            {% set soc = states('sensor.camper_battery_soc') | float(-1) %}
+            {% if soc >= 0 and soc <= 20 %}
+              {% set ns.a = ns.a + ['🔴 **BATTERY LOW** — ' ~ soc | round(0) ~ '% state of charge  ·  *Energy tab*'] %}
+            {% endif %}
+
+            {# Fallback is otherwise SILENT: readings keep updating from the
+               shunt and nothing on screen changes, so without this you would
+               never know a BMS bank had dropped. #}
+            {% set b1ok = states('sensor.battery_1_current') not in bad %}
+            {% set b2ok = states('sensor.battery_2_current') not in bad %}
+            {% set shok = states('sensor.920ah_battery_pack_ampers') not in bad %}
+            {% if not (b1ok and b2ok) and shok %}
+              {% set which = 'bank 2' if b1ok else ('bank 1' if b2ok else 'both banks') %}
+              {% set ns.a = ns.a + ['🟠 **BATTERY ON SHUNT FALLBACK** — BMS ' ~ which ~ ' not reporting, figures are coming from the 920Ah shunt.  ·  *Energy tab*'] %}
+            {% endif %}
+            {% if not (b1ok and b2ok) and not shok %}
+              {% set ns.a = ns.a + ['🔴 **NO BATTERY DATA** — both BMS banks and the 920Ah shunt are unavailable.  ·  *Energy tab*'] %}
+            {% endif %}
+
+            {# ---- WATER ----
+               float(-1) is deliberate: the tank sensors are UNAVAILABLE while
+               the gauges relay is off (00:00-07:00), and -1 fails both tests,
+               so these self-suppress overnight instead of false-alarming. #}
+            {% set grey = states('sensor.gray_water_tank') | float(-1) %}
+            {% set clear = states('sensor.clear_water_tank') | float(-1) %}
+            {% if grey >= 90 %}
+              {% set ns.a = ns.a + ['🟠 **GREY TANK NEARLY FULL** — ' ~ grey | round(0) ~ '%  ·  *Water tab*'] %}
+            {% endif %}
+            {% if clear >= 0 and clear <= 10 %}
+              {% set ns.a = ns.a + ['🟠 **CLEAR WATER LOW** — ' ~ clear | round(0) ~ '% remaining  ·  *Water tab*'] %}
+            {% endif %}
+
+            {# Running a diaphragm pump dry damages it. This only ALERTS - it
+               does not switch the pump off, since cutting it automatically was
+               not asked for. If the relay board is offline, clear is -1 and
+               this stays quiet rather than false-alarming. #}
+            {% if clear >= 0 and clear <= 5 and is_state('switch.relay_board_water_pump','on') %}
+              {% set ns.a = ns.a + ['🔴 **WATER PUMP RUNNING DRY** — clear tank at ' ~ clear | round(0) ~ '%. Switch the pump off to avoid damaging it.  ·  *Water tab*'] %}
+            {% endif %}
+
+            {{ ns.a }}
+
+      # ================= SUSPENSION STATUS =================
+      # 20 psi = on bumpstops, ~42 = ride height, 70 = fully extended
+      - name: "Camper Suspension Stance"
+        unique_id: camper_suspension_stance
+        icon: mdi:arrow-expand-vertical
+        state: >
+          {% set fl = states('sensor.camper_air_suspension_height_fl') | float(-1) %}
+          {% set fr = states('sensor.camper_air_suspension_height_fr') | float(-1) %}
+          {% set rl = states('sensor.camper_air_suspension_height_rl') | float(-1) %}
+          {% set rr = states('sensor.camper_air_suspension_height_rr') | float(-1) %}
+          {% if [fl, fr, rl, rr] | min < 0 %}
+            Unknown
+          {% else %}
+            {% set avg = (fl + fr + rl + rr) / 4 %}
+            {% if avg < 12 %}On Bumpstops
+            {% elif avg < 35 %}Low
+            {% elif avg <= 60 %}Ride Height
+            {% elif avg <= 82 %}High
+            {% else %}Max Extension{% endif %}
+          {% endif %}
+
+      - name: "Camper Suspension Balance"
+        unique_id: camper_suspension_balance
+        icon: mdi:scale-balance
+        state: >
+          {% set fl = states('sensor.camper_air_suspension_height_fl') | float(-1) %}
+          {% set fr = states('sensor.camper_air_suspension_height_fr') | float(-1) %}
+          {% set rl = states('sensor.camper_air_suspension_height_rl') | float(-1) %}
+          {% set rr = states('sensor.camper_air_suspension_height_rr') | float(-1) %}
+          {% set th = states('input_number.camper_balance_threshold') | float(3) %}
+          {% if [fl, fr, rl, rr] | min < 0 %}
+            Unknown
+          {% else %}
+            {% set issues = [] %}
+            {% if (fl - fr) | abs > th %}
+              {% set issues = issues + ['Front L/R Δ' ~ (fl - fr) | abs | round(0) ~ '%'] %}
+            {% endif %}
+            {% if (rl - rr) | abs > th %}
+              {% set issues = issues + ['Rear L/R Δ' ~ (rl - rr) | abs | round(0) ~ '%'] %}
+            {% endif %}
+            {% if ((fl + fr) / 2 - (rl + rr) / 2) | abs > th %}
+              {% set issues = issues + ['Front/Rear Δ' ~ ((fl + fr) / 2 - (rl + rr) / 2) | abs | round(0) ~ '%'] %}
+            {% endif %}
+            {{ 'Balanced' if issues | count == 0 else issues | join(' · ') }}
+          {% endif %}
+
+      # ================= WATER =================
+      # Levels are REAL (KC868 AI1/AI2). The three TEMPERATURE sensors below
+      # are kept as stubs: every placeholder helper is gone, so they report
+      # UNAVAILABLE. They exist only to hold their entity ids and history
+      # until the Dallas DS18B20 sensors are wired to the KC868 1-Wire header
+      # (GPIO14) - at that point replace the state: line with the real sensor
+      # and delete the availability: line. Deleting these instead would lose
+      # the ids and every dashboard tile pointing at them.
+      # v38: REAL tank levels from the KC868 relay board (AI1/AI2).
+      # Entity ids deliberately unchanged (sensor.clear_water_tank /
+      # sensor.gray_water_tank) so nothing on the dashboard has to move.
+      # NOTE the spelling: the ESP sensor is "grey", the HA one is "gray".
+      # The board publishes NaN whenever the Water Gauges relay (RE14) is off,
+      # because the senders are unpowered then - so these go UNAVAILABLE
+      # rather than reporting a false 0%. With the 00:00-07:00 gauges
+      # schedule that means blank overnight. Intended.
+      - name: "Clear Water Tank"
+        unique_id: clear_water_tank
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:cup-water
+        state: "{{ states('sensor.relay_board_clear_water_tank') | float(0) | round(0) }}"
+        availability: >
+          {{ states('sensor.relay_board_clear_water_tank')
+             not in ['unknown','unavailable','none',''] }}
+
+      - name: "Gray Water Tank"
+        unique_id: gray_water_tank
+        unit_of_measurement: "%"
+        state_class: measurement
+        icon: mdi:water-opacity
+        state: "{{ states('sensor.relay_board_grey_water_tank') | float(0) | round(0) }}"
+        availability: >
+          {{ states('sensor.relay_board_grey_water_tank')
+             not in ['unknown','unavailable','none',''] }}
+
+      # ---- v54: LITRES (reworked in v55) ----
+      # Read from the board's raw tank VOLTAGE, not from tank %, because the
+      # percentage is on the gauge-matched scale (see the input_numbers at the
+      # top of this file). Capacities are the owner's figures: clear 280 L,
+      # grey 100 L.
+      #
+      # v55 fixes two things that made both sensors read "unknown":
+      #  1. UNIT. v54 assumed the voltage sensor publishes volts and
+      #     multiplied by 1000. Live it reports 1318 for a full clear tank -
+      #     already millivolts, because the entity carries a unit conversion.
+      #     Multiplying again gave 1.3 million mV. The mv() macro below
+      #     accepts either: under 10 is treated as volts, otherwise as mV. So
+      #     it stays correct whichever unit the entity ends up reporting.
+      #  2. UNSET HELPERS. These input_numbers have no "initial:" on purpose
+      #     (HA would reset them on every restart), so they are created at
+      #     0.0. A Jinja default() never fires for 0.0 - it is a real value -
+      #     so empty and full both came out 0, full <= empty, and the sensor
+      #     returned none. Now 0 explicitly means "not set yet" and the
+      #     fallback below is used instead.
+      - name: "Clear Water Litres"
+        unique_id: camper_clear_water_litres
+        unit_of_measurement: "L"
+        state_class: measurement
+        icon: mdi:cup-water
+        state: >
+          {% set raw = states('sensor.relay_board_clear_tank_voltage') | float(-1) %}
+          {% set mv = raw * 1000 if (raw > 0 and raw < 10) else raw %}
+          {% set d = states('input_number.camper_clear_dry_mv')  | float(0) %}
+          {% set f = states('input_number.camper_clear_full_mv') | float(0) %}
+          {% set d = 142  if d <= 0 else d %}
+          {% set f = 1318 if f <= 0 else f %}
+          {% if mv < 0 or f <= d %}
+            {{ none }}
+          {% else %}
+            {% set l = (mv - d) / (f - d) * 280 %}
+            {{ [[l, 0] | max, 280] | min | round(0) }}
+          {% endif %}
+        availability: >
+          {{ states('sensor.relay_board_clear_tank_voltage')
+             not in ['unknown','unavailable','none',''] }}
+
+      - name: "Gray Water Litres"
+        unique_id: camper_gray_water_litres
+        unit_of_measurement: "L"
+        state_class: measurement
+        icon: mdi:water-opacity
+        state: >
+          {% set raw = states('sensor.relay_board_grey_tank_voltage') | float(-1) %}
+          {% set mv = raw * 1000 if (raw > 0 and raw < 10) else raw %}
+          {% set d = states('input_number.camper_grey_dry_mv')  | float(0) %}
+          {% set f = states('input_number.camper_grey_full_mv') | float(0) %}
+          {% set d = 142  if d <= 0 else d %}
+          {% set f = 1467 if f <= 0 else f %}
+          {% if mv < 0 or f <= d %}
+            {{ none }}
+          {% else %}
+            {% set l = (mv - d) / (f - d) * 100 %}
+            {{ [[l, 0] | max, 100] | min | round(0) }}
+          {% endif %}
+        availability: >
+          {{ states('sensor.relay_board_grey_tank_voltage')
+             not in ['unknown','unavailable','none',''] }}
+
+      - name: "Clear Water Temperature"
+        unique_id: clear_water_temperature
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: "{{ none }}"
+        availability: "{{ false }}"
+
+      - name: "Gray Water Temperature"
+        unique_id: gray_water_temperature
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: "{{ none }}"
+        availability: "{{ false }}"
+
+      - name: "Pipe Temperature"
+        unique_id: pipe_temperature
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        state: "{{ none }}"
+        availability: "{{ false }}"
+
+  # v43 - MUST stay at the END of template:. In v40 this block sat in the
+  # middle of the sensor list, and because "- binary_sensor:" starts a new
+  # template entry, every sensor defined AFTER it (suspension stance/balance,
+  # both water tanks, all three temps) was silently redefined as a
+  # binary_sensor. That is why sensor.clear_water_tank reported "no longer
+  # being provided by the template integration".
+  - binary_sensor:
+      # Drives the conditional wrapper so the alert card takes ZERO height
+      # when nothing is wrong.
+      - name: "Camper Any Alert"
+        unique_id: camper_any_alert
+        device_class: problem
+        icon: mdi:alert
+        state: "{{ (state_attr('sensor.camper_alert_summary','lines') | default([], true) | count) > 0 }}"
+
+
+  # ---- v56: SUSPENSION UNLOCK COUNTDOWN ----
+  # WHY THIS EXISTS. The countdown used to be computed inside the button-card
+  # from entity.last_changed, with triggers_update pointed at a couple of fast
+  # suspension sensors to force a re-render. It froze at "5:02" - two separate
+  # faults in one: the card was not re-rendering, and the 5:02 (more than the
+  # 5:00 maximum) was browser-vs-server clock skew, the tablet running about
+  # two seconds behind HA.
+  # Computing it here fixes both. now() is the SERVER clock, so no skew is
+  # possible, and because the button-card points at this sensor as its own
+  # entity it re-renders whenever the state changes - no triggers_update, no
+  # dependence on some unrelated sensor happening to update.
+  #
+  # DATABASE COST: the time_pattern fires every 5s, but while locked the state
+  # is the constant "LOCKED", and HA does not record a state that has not
+  # changed. So this writes rows only during the 5 minutes an unlock is
+  # actually open - about 60 rows per unlock, a few times a month.
+  # v57 - ticks every SECOND, not every 5. At /5 the display jumped 4:10 ->
+  # 4:05, which reads like a stuck clock rather than a countdown. The database
+  # cost is unchanged - while locked the state is the constant "LOCKED" and HA
+  # does not record an unchanged state, so this still only writes during the
+  # five minutes an unlock is open (300 rows instead of 60, a few times a
+  # month). Evaluating a four-line template once a second is negligible.
+  - trigger:
+      - platform: time_pattern
+        seconds: "/1"
+      - platform: state
+        entity_id: input_boolean.camper_settings_unlock
+    sensor:
+      - name: "Camper Settings Unlock Countdown"
+        unique_id: camper_settings_unlock_countdown
+        icon: mdi:lock-clock
+        state: >
+          {% if is_state('input_boolean.camper_settings_unlock','on') %}
+            {% set el = (now() - states.input_boolean.camper_settings_unlock.last_changed).total_seconds() %}
+            {# v57 - round UP. Truncating made the very first tick read 4:59
+               rather than 5:00, because by then a fraction of a second had
+               already gone. Ceiling means a full 5:00 is shown at the moment
+               of unlocking and 0:00 only when the time really is up. #}
+            {% set t = [[(300 - el) | round(0, 'ceil') | int, 0] | max, 300] | min %}
+            {{ '{}:{:02d}'.format(t // 60, t % 60) }}
+          {% else %}
+            LOCKED
+          {% endif %}
+
+
+utility_meter:
+  camper_solar_today:
+    name: Camper Solar Today
+    source: sensor.camper_solar_energy_total
+    cycle: daily
+
+# ------------------------------------------------------------
+# SCRIPTS - lighting scenes
+# ------------------------------------------------------------
+automation:
+  # v52 - relock the suspension settings 5 minutes after they are unlocked,
+  # so an unlock left on by accident does not stay open indefinitely. mode:
+  # restart means each new unlock restarts the full 5 minutes.
+  - alias: "Camper - Relock suspension settings"
+    id: camper_relock_suspension_settings
+    mode: restart
+    trigger:
+      - platform: state
+        entity_id: input_boolean.camper_settings_unlock
+        to: "on"
+        for: "00:05:00"
+    action:
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.camper_settings_unlock
+
+  # v32 - the heater's own display tops out at 36 C, but the climate entity
+  # advertises 40. Setting 40 looked accepted and then silently fell back to
+  # 36 a while later. This pulls it straight back so the UI never shows a
+  # value the heater will not hold.
+  - alias: "Camper - Clamp heater target temperature"
+    id: camper_clamp_heater_target
+    mode: single
+    trigger:
+      - platform: state
+        entity_id: climate.diesel_heater
+        attribute: temperature
+    condition:
+      - condition: template
+        value_template: >
+          {{ (state_attr('climate.diesel_heater','temperature') | float(0)) > 36 }}
+    action:
+      - action: climate.set_temperature
+        target:
+          entity_id: climate.diesel_heater
+        data:
+          temperature: 36
+
+script:
+  # v32 - set a gear and mark it PENDING until the heater actually reports it.
+  # The Vevor takes a few seconds to acknowledge, which made the buttons feel
+  # dead. mode: restart so a second press cancels the previous wait.
+  camper_set_gear:
+    alias: Set Heater Gear
+    icon: mdi:speedometer
+    mode: restart
+    fields:
+      level:
+        name: Level
+        description: Gear 1-10
+        required: true
+        selector:
+          number:
+            min: 1
+            max: 10
+    sequence:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.camper_pending_gear
+        data:
+          value: "{{ level | int(1) }}"
+      - action: number.set_value
+        target:
+          entity_id: number.diesel_heater_level
+        data:
+          value: "{{ level | int(1) }}"
+      - wait_template: >
+          {{ states('number.diesel_heater_level') | int(-1) == level | int(1) }}
+        timeout: "00:00:45"
+        continue_on_timeout: true
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.camper_pending_gear
+        data:
+          value: 0
+
+  # v31 - switching the running mode ALONE leaves the climate entity on its
+  # previous hvac_mode, so the thermostat card keeps showing the gear/fan
+  # control after going back to Temperature. This sets both together.
+  # Guards: only touches hvac_mode when the heater is already running (so it
+  # can never start the heater by accident) and only if the mode is actually
+  # supported by the entity.
+  camper_heater_set_mode:
+    alias: Set Heater Mode
+    icon: mdi:tune
+    mode: single
+    fields:
+      mode:
+        name: Mode
+        description: Temperature or Level
+        required: true
+        selector:
+          text:
+    sequence:
+      - action: select.select_option
+        target:
+          entity_id: select.diesel_heater_running_mode
+        data:
+          option: "{{ mode }}"
+      - delay:
+          milliseconds: 700
+      - condition: template
+        value_template: >
+          {{ states('climate.diesel_heater') not in ['off','unknown','unavailable','none'] }}
+      - condition: template
+        value_template: >
+          {% set want = 'heat' if mode == 'Temperature' else 'fan_only' %}
+          {{ want in (state_attr('climate.diesel_heater','hvac_modes') or []) }}
+      - action: climate.set_hvac_mode
+        target:
+          entity_id: climate.diesel_heater
+        data:
+          hvac_mode: "{{ 'heat' if mode == 'Temperature' else 'fan_only' }}"
+
+  # v26 - records a new fuel baseline. Call after physically filling; the
+  # dashboard asks for confirmation first.
+  camper_set_fuel_level:
+    alias: Set Diesel Fuel Level
+    icon: mdi:fuel
+    mode: single
+    sequence:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.camper_fuel_start_litres
+        data:
+          value: "{{ states('input_select.camper_fuel_level').split(' ')[0] | float(0) }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.camper_fuel_baseline
+        data:
+          value: "{{ states('sensor.diesel_heater_estimated_total_fuel_consumed') | float(0) }}"
+
+  # ============== LIGHT SCENES (v34) ==============
+  # Rebuilt on the corrected relay map. The eight lighting relays are listed
+  # explicitly rather than looped 1..10, because RE07 (Fan) and RE09 (Water
+  # Pump) sit inside that number range and must never be swept by a lights
+  # scene.
+  camper_all_lights_off:
+    alias: All Lights Off
+    icon: mdi:lightbulb-group-off
+    sequence:
+      - action: switch.turn_off
+        target:
+          entity_id:
+            - switch.relay_board_main_light
+            - switch.relay_board_outdoor_left
+            - switch.relay_board_bedroom_light
+            - switch.relay_board_front_outdoor
+            - switch.relay_board_main_bedroom_red
+            - switch.relay_board_outdoor_right
+            - switch.relay_board_awning_red_left
+            - switch.relay_board_awning_red_right
+
+  camper_all_lights_on:
+    alias: All Lights On
+    icon: mdi:lightbulb-group
+    sequence:
+      - action: switch.turn_on
+        target:
+          entity_id:
+            - switch.relay_board_main_light
+            - switch.relay_board_outdoor_left
+            - switch.relay_board_bedroom_light
+            - switch.relay_board_front_outdoor
+            - switch.relay_board_main_bedroom_red
+            - switch.relay_board_outdoor_right
+            - switch.relay_board_awning_red_left
+            - switch.relay_board_awning_red_right
+
+  # v53: TOGGLE over the same eight lighting relays as All On / All Off, for
+  # the single All Lights key on the Cameras tab. Any light on -> everything
+  # off; nothing on -> everything on. Same if/then/else shape as the exterior
+  # toggle below, so the two behave identically.
+  camper_all_lights_toggle:
+    alias: All Lights (toggle)
+    icon: mdi:lightbulb-group
+    sequence:
+      - if:
+          - condition: template
+            value_template: >
+              {{ is_state('switch.relay_board_main_light', 'on') or
+                 is_state('switch.relay_board_outdoor_left', 'on') or
+                 is_state('switch.relay_board_bedroom_light', 'on') or
+                 is_state('switch.relay_board_front_outdoor', 'on') or
+                 is_state('switch.relay_board_main_bedroom_red', 'on') or
+                 is_state('switch.relay_board_outdoor_right', 'on') or
+                 is_state('switch.relay_board_awning_red_left', 'on') or
+                 is_state('switch.relay_board_awning_red_right', 'on') }}
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id:
+                - switch.relay_board_main_light
+                - switch.relay_board_outdoor_left
+                - switch.relay_board_bedroom_light
+                - switch.relay_board_front_outdoor
+                - switch.relay_board_main_bedroom_red
+                - switch.relay_board_outdoor_right
+                - switch.relay_board_awning_red_left
+                - switch.relay_board_awning_red_right
+        else:
+          - action: switch.turn_on
+            target:
+              entity_id:
+                - switch.relay_board_main_light
+                - switch.relay_board_outdoor_left
+                - switch.relay_board_bedroom_light
+                - switch.relay_board_front_outdoor
+                - switch.relay_board_main_bedroom_red
+                - switch.relay_board_outdoor_right
+                - switch.relay_board_awning_red_left
+                - switch.relay_board_awning_red_right
+
+  # v37: TOGGLE, same behaviour as Stealth. Press once = on, press again = off.
+  # id kept as camper_exterior_lights_on so the dashboard tile still resolves.
+  camper_exterior_lights_on:
+    alias: Exterior Lights (toggle)
+    icon: mdi:lightbulb-group
+    sequence:
+      - if:
+          - condition: template
+            value_template: >
+              {{ is_state('switch.relay_board_front_outdoor', 'on') or
+                 is_state('switch.relay_board_outdoor_left', 'on') or
+                 is_state('switch.relay_board_outdoor_right', 'on') }}
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id:
+                - switch.relay_board_front_outdoor
+                - switch.relay_board_outdoor_left
+                - switch.relay_board_outdoor_right
+        else:
+          - action: switch.turn_on
+            target:
+              entity_id:
+                - switch.relay_board_front_outdoor
+                - switch.relay_board_outdoor_left
+                - switch.relay_board_outdoor_right
+
+  # v37: TOGGLE. Red already on -> switch it off (whites are already off, so
+  # the result is everything off). Otherwise -> whites off, red on.
+  camper_night_mode:
+    alias: Night Mode (toggle)
+    icon: mdi:weather-night
+    sequence:
+      - if:
+          - condition: template
+            value_template: >
+              {{ is_state('switch.relay_board_main_bedroom_red', 'on') }}
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id:
+                - switch.relay_board_main_bedroom_red
+        else:
+          - action: switch.turn_off
+            target:
+              entity_id:
+                - switch.relay_board_main_light
+                - switch.relay_board_bedroom_light
+                - switch.relay_board_front_outdoor
+                - switch.relay_board_outdoor_left
+                - switch.relay_board_outdoor_right
+          - action: switch.turn_on
+            target:
+              entity_id:
+                - switch.relay_board_main_bedroom_red
+
+  camper_stealth_mode:
+    alias: Stealth Mode (toggle reds)
+    icon: mdi:incognito
+    sequence:
+      - if:
+          - condition: template
+            value_template: >
+              {{ 
+                 is_state('switch.relay_board_main_bedroom_red', 'on') or
+                 is_state('switch.relay_board_awning_red_left', 'on') or
+                 is_state('switch.relay_board_awning_red_right', 'on') }}
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id:
+                - switch.relay_board_main_bedroom_red
+                - switch.relay_board_awning_red_left
+                - switch.relay_board_awning_red_right
+        else:
+          - action: switch.turn_on
+            target:
+              entity_id:
+                - switch.relay_board_main_bedroom_red
+                - switch.relay_board_awning_red_left
+                - switch.relay_board_awning_red_right

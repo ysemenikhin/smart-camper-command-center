@@ -1,0 +1,156 @@
+# ============================================================
+# SMART CAMPER - router GPS package   (v1)
+# Install as /homeassistant/packages/camper_gps.yaml
+# configuration.yaml already loads every file in packages/
+# (!include_dir_named), so nothing else needs editing.
+#
+# CHANGELOG
+#   v1 - 2026-10-21. Replaces the UI automation "GLnet router GPS update"
+#        (webhook glnet_router_gps -> device_tracker.see + set_location).
+#        DELETE THAT AUTOMATION FIRST: HA lets both listen on the same
+#        webhook, so it would keep calling device_tracker.see and moving the
+#        home location on every report (every 10 s while driving).
+#        device_tracker.see is removed in HA 2027.5, so the trailer position
+#        is now a TEMPLATE DEVICE TRACKER (template integration, HA 2026.10).
+#        Sender: router script /usr/bin/camper-gps.sh v1 (GL-X3000), which
+#        posts every 10 s while moving (> 5 km/h) and every 300 s parked.
+#
+#        ENTITIES (all from the same webhook):
+#          device_tracker.camper_gps    position (map), state home/not_home
+#          sensor.camper_gps_speed      km/h   - long-term statistics
+#          sensor.camper_gps_heading    deg    - empty while parked
+#          sensor.camper_gps_altitude   m      - GPS altitude (the Home-tab
+#                                                 Elevation tile still reads
+#                                                 the heater; not changed)
+#          sensor.camper_gps_satellites count  - satellites used for the fix
+#
+#        STALE DATA: all five go UNAVAILABLE if nothing has arrived for
+#        660 s (= 2 x 300 s parked interval + 60 s), checked every minute.
+#        Without this a router that stops sending mid-drive would leave the
+#        last speed (e.g. 80 km/h) frozen, and it would go into statistics.
+#
+#        WEATHER: HA's home location (zone.home, used by the weather) is moved
+#        to the trailer only when it is more than 2 km from it, so the
+#        forecast is not re-fetched every 10 s while driving.
+#        2026-10-21 check: zone.home <lat>, <lon> vs router GPS
+#        <lat>, <lon> = 3.5 m apart, so nothing moves at install.
+# ============================================================
+
+template:
+  - triggers:
+      # The router's position report.
+      - trigger: webhook
+        id: gps
+        webhook_id: glnet_router_gps
+        local_only: true
+        allowed_methods:
+          - POST
+      # Once a minute: re-check whether the data has gone stale. On this
+      # trigger every entity keeps its current value (this.state).
+      - trigger: time_pattern
+        id: tick
+        minutes: "/1"
+
+    device_tracker:
+      - name: Camper GPS
+        unique_id: camper_gps_tracker
+        default_entity_id: device_tracker.camper_gps
+        icon: mdi:caravan
+        availability: >-
+          {% set r = this.attributes.get('received') %}
+          {{ trigger.id == 'gps'
+             or (r is not none and (now() - as_datetime(r)).total_seconds() < 660) }}
+        latitude: >-
+          {{ trigger.json.lat | float(none) if trigger.id == 'gps'
+             else this.attributes.get('latitude') }}
+        longitude: >-
+          {{ trigger.json.lon | float(none) if trigger.id == 'gps'
+             else this.attributes.get('longitude') }}
+        attributes:
+          # HA's own clock time of the last report - what "stale" is
+          # measured against (the GPS time below is the router's).
+          received: >-
+            {{ now().isoformat() if trigger.id == 'gps'
+               else this.attributes.get('received') }}
+          gps_time: >-
+            {{ trigger.json.time if trigger.id == 'gps'
+               else this.attributes.get('gps_time') }}
+          speed_kmh: >-
+            {{ trigger.json.speed if trigger.id == 'gps'
+               else this.attributes.get('speed_kmh') }}
+          hdop: >-
+            {{ trigger.json.hdop if trigger.id == 'gps'
+               else this.attributes.get('hdop') }}
+
+    sensor:
+      - name: Camper GPS Speed
+        unique_id: camper_gps_speed
+        default_entity_id: sensor.camper_gps_speed
+        icon: mdi:speedometer
+        unit_of_measurement: km/h
+        device_class: speed
+        state_class: measurement
+        availability: &camper_gps_fresh >-
+          {% set r = state_attr('device_tracker.camper_gps', 'received') %}
+          {{ trigger.id == 'gps'
+             or (r is not none and (now() - as_datetime(r)).total_seconds() < 660) }}
+        state: >-
+          {% if trigger.id == 'gps' %}{{ trigger.json.speed | float(none) }}
+          {% else %}{{ this.state if is_number(this.state) else none }}{% endif %}
+
+      - name: Camper GPS Heading
+        unique_id: camper_gps_heading
+        default_entity_id: sensor.camper_gps_heading
+        icon: mdi:compass-outline
+        unit_of_measurement: "°"
+        availability: *camper_gps_fresh
+        state: >-
+          {% if trigger.id == 'gps' %}{{ trigger.json.heading | float(none) }}
+          {% else %}{{ this.state if is_number(this.state) else none }}{% endif %}
+
+      - name: Camper GPS Altitude
+        unique_id: camper_gps_altitude
+        default_entity_id: sensor.camper_gps_altitude
+        icon: mdi:image-filter-hdr
+        unit_of_measurement: m
+        device_class: distance
+        state_class: measurement
+        availability: *camper_gps_fresh
+        state: >-
+          {% if trigger.id == 'gps' %}{{ trigger.json.alt | float(none) }}
+          {% else %}{{ this.state if is_number(this.state) else none }}{% endif %}
+
+      - name: Camper GPS Satellites
+        unique_id: camper_gps_satellites
+        default_entity_id: sensor.camper_gps_satellites
+        icon: mdi:satellite-variant
+        state_class: measurement
+        availability: *camper_gps_fresh
+        state: >-
+          {% if trigger.id == 'gps' %}{{ trigger.json.sats | int(none) }}
+          {% else %}{{ this.state if is_number(this.state) else none }}{% endif %}
+
+automation:
+  - id: camper_gps_home_location
+    alias: Camper GPS - home location follows the trailer
+    description: >-
+      Moves HA's home location (zone.home, used by the weather) to the trailer
+      when the trailer is more than 2 km from it. Package camper_gps.yaml v1.
+    mode: single
+    max_exceeded: silent
+    triggers:
+      # No from/to: fires on every new position (attribute change), not on
+      # the once-a-minute re-check, which changes nothing.
+      - trigger: state
+        entity_id: device_tracker.camper_gps
+    conditions:
+      - condition: template
+        value_template: >-
+          {% set la = state_attr('device_tracker.camper_gps', 'latitude') %}
+          {% set lo = state_attr('device_tracker.camper_gps', 'longitude') %}
+          {{ la is number and lo is number and distance(la, lo) > 2 }}
+    actions:
+      - action: homeassistant.set_location
+        data:
+          latitude: "{{ state_attr('device_tracker.camper_gps', 'latitude') }}"
+          longitude: "{{ state_attr('device_tracker.camper_gps', 'longitude') }}"

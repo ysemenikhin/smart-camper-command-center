@@ -1,0 +1,21 @@
+# secrets
+esphome/secrets.yaml
+secrets.yaml
+*.pem
+*.key
+# ESPHome build output
+esphome/.esphome/
+.esphome/
+# HA runtime
+*.db
+*.db-shm
+*.db-wal
+home-assistant.log*
+.storage/
+# render tool
+tools/render-screenshots/venv/
+tools/render-screenshots/config/
+# OS / editors
+.DS_Store
+.vscode/
+.idea/

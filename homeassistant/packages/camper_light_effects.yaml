@@ -1,0 +1,160 @@
+# ============================================================
+# SMART CAMPER - light effects package   (v2)
+# Install as /homeassistant/packages/camper_light_effects.yaml
+# configuration.yaml already loads every file in packages/
+# (!include_dir_named), so nothing else needs editing.
+# Kept separate from packages/camper.yaml on purpose: adding these touched
+# no line of that file.
+#
+# CHANGELOG
+#   v2 - 2026-10-20. POLICE is now WHITE / RED instead of LEFT / RIGHT:
+#          white = Outdoor Left + Outdoor Right together, flash 2x
+#          red   = Awning Red Left + Awning Red Right together, flash 2x
+#        200 ms on / 200 ms off, cycle 1.6 s, repeats until the tile is
+#        tapped again; all FOUR lights then end OFF.
+#        Wear: each of the 4 relays does 4 operations per 1.6 s = 9,000 per
+#        hour (same rate as v1, now on 4 relays instead of 2).
+#        While Police runs it also overrides the awning reds: Stealth Mode
+#        and the Awning L/R Red tiles do not stop it - only the Police tile.
+#        Script ids unchanged, so dashboard v205 needs no edit. FRONT FLASH
+#        unchanged.
+#   v1 - 2026-10-20. Two outdoor light effects, HA-only (no relay-board
+#        firmware change). Tiles on the Lighting tab, dashboard v205.
+#        POLICE  - Outdoor Left / Outdoor Right alternate, 2 flashes per
+#                  side, 200 ms on / 200 ms off; one full L+R cycle = 1.6 s.
+#                  Runs until the tile is tapped again; both lights then end
+#                  OFF.
+#        FRONT FLASH - Front Outdoor flashes 3 times, 200 ms on / 200 ms off
+#                  (1.2 s), then ends OFF by itself. If it was on, it is
+#                  switched off first for 200 ms so all 3 flashes are visible.
+#
+#        TIMING: driven from HA. Measured command latency HA -> relay board
+#        was 109-122 ms (RF log 2026-10-20 22:32), i.e. about +/-13 ms of
+#        jitter, so 200 ms steps stay even. Shorter steps would not.
+#        WEAR: the outdoor lights switch through MECHANICAL relays. Police
+#        runs 4 operations per side relay every 1.6 s = 2.5/s = 9,000 per
+#        hour per relay. Front Flash = 6 operations per tap.
+#        Police overrides Left/Right while it runs: their tiles, Exterior On
+#        and All Lights do not stop it - only the Police tile does.
+# ============================================================
+
+script:
+  # The flashing loop itself. Started and stopped only through
+  # camper_police_toggle, which also guarantees all four lights end OFF.
+  # v2 - WHITE pair 2x, then RED pair 2x (was left 2x, then right 2x).
+  camper_police_lights:
+    alias: Police Lights (white/red loop)
+    icon: mdi:alarm-light
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - action: switch.turn_off
+        target:
+          entity_id:
+            - switch.relay_board_outdoor_left
+            - switch.relay_board_outdoor_right
+            - switch.relay_board_awning_red_left
+            - switch.relay_board_awning_red_right
+      - repeat:
+          # Runs until script.turn_off cancels it.
+          while:
+            - condition: template
+              value_template: "{{ true }}"
+          sequence:
+            # WHITE: Outdoor Left + Outdoor Right together
+            - repeat:
+                count: 2
+                sequence:
+                  - action: switch.turn_on
+                    target:
+                      entity_id:
+                        - switch.relay_board_outdoor_left
+                        - switch.relay_board_outdoor_right
+                  - delay:
+                      milliseconds: 200
+                  - action: switch.turn_off
+                    target:
+                      entity_id:
+                        - switch.relay_board_outdoor_left
+                        - switch.relay_board_outdoor_right
+                  - delay:
+                      milliseconds: 200
+            # RED: Awning Red Left + Awning Red Right together
+            - repeat:
+                count: 2
+                sequence:
+                  - action: switch.turn_on
+                    target:
+                      entity_id:
+                        - switch.relay_board_awning_red_left
+                        - switch.relay_board_awning_red_right
+                  - delay:
+                      milliseconds: 200
+                  - action: switch.turn_off
+                    target:
+                      entity_id:
+                        - switch.relay_board_awning_red_left
+                        - switch.relay_board_awning_red_right
+                  - delay:
+                      milliseconds: 200
+
+  # Tile action. Running -> stop the loop, then all four lights OFF (the loop
+  # can be cancelled mid-flash with a pair on, so the explicit turn_off is
+  # what guarantees the "ends off" result). Not running -> start it.
+  camper_police_toggle:
+    alias: Police Lights (toggle)
+    icon: mdi:alarm-light
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - if:
+          - condition: state
+            entity_id: script.camper_police_lights
+            state: "on"
+        then:
+          - action: script.turn_off
+            target:
+              entity_id: script.camper_police_lights
+          - action: switch.turn_off
+            target:
+              entity_id:
+                - switch.relay_board_outdoor_left
+                - switch.relay_board_outdoor_right
+                - switch.relay_board_awning_red_left
+                - switch.relay_board_awning_red_right
+        else:
+          - action: script.turn_on
+            target:
+              entity_id: script.camper_police_lights
+
+  # One tap = 3 flashes, then OFF. A tap while it is running is ignored
+  # (mode: single), so a double-tap cannot stack a second burst.
+  camper_front_flash:
+    alias: Front Flash (3x)
+    icon: mdi:car-light-high
+    mode: single
+    max_exceeded: silent
+    sequence:
+      - if:
+          - condition: state
+            entity_id: switch.relay_board_front_outdoor
+            state: "on"
+        then:
+          - action: switch.turn_off
+            target:
+              entity_id: switch.relay_board_front_outdoor
+          - delay:
+              milliseconds: 200
+      - repeat:
+          count: 3
+          sequence:
+            - action: switch.turn_on
+              target:
+                entity_id: switch.relay_board_front_outdoor
+            - delay:
+                milliseconds: 200
+            - action: switch.turn_off
+              target:
+                entity_id: switch.relay_board_front_outdoor
+            - delay:
+                milliseconds: 200

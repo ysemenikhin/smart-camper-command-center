@@ -1,0 +1,8 @@
+extends: relaxed
+rules:
+  line-length: disable
+  comments-indentation: disable
+  truthy: disable
+  indentation: { spaces: consistent, indent-sequences: whatever }
+  trailing-spaces: disable
+  new-line-at-end-of-file: disable

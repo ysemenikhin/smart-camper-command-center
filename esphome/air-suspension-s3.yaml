@@ -1,0 +1,3106 @@
+# ============================================================
+# CAMPER AIR SUSPENSION  -  v4.3.0
+# Expedition trailer (expedition trailer)
+#
+# HARDWARE
+#   Manifold : "DOWN" air management, generation V3 ("DOWN3")
+#              BLE MAC XX:XX:XX:XX:XX:XX, service fee9
+#              (FFF0 svc, FFF1 notify, FFF2 write). No auth.
+#              V3 has NO authentication - connect and go
+#              (older V2 manifold needed password/login 1111).
+#   Springs  : 4 independent corner air bags
+#   Valves   : side-paired bypass relay = "Offroad Mode Max
+#              Articulation" (FL<->RL and FR<->RR linked)
+#   Relay 2  : "Air Manifold" master power (ALWAYS_ON at boot)
+#   IMU      : BMI160 6-axis, pitch/roll + on-device auto-level
+#
+# LOGIC (all on the ESP - HA optional)
+#   - PSI presets: Parked / Hwy Normal / Hwy Heavy / Off-Road /
+#     Easy Maneuver, Front+Rear targets, +/-1 psi deadband
+#   - Preset Auto Maintain: supervisor re-adjusts on drift
+#   - Auto-level on IMU with min/max PSI safety gates
+#   - Emergency overpressure dump watchdog
+#   - Manifold BLE Link switch: manual disconnect frees the
+#     manifold for the DOWN phone app (one BLE client at a time)
+# ============================================================
+
+substitutions:
+  device_name: camper-air-system
+  friendly_name: "Camper Air Suspension"
+  manifold_mac: !secret manifold_mac
+
+  # DOWN3 (Gen3) BLE UUIDs - CONFIRMED by nRF Connect GATT dump:
+  # service FFF0, FFF2 = write, FFF1 = notify (CCCD 2902).
+  # (The app's fee9/d44bc439 in Options.java is the BLE library
+  # default, NOT what this device exposes.)
+  svc_uuid: "FFF0"
+  notify_uuid: "FFF1"
+  write_uuid: "FFF2"
+
+  config_version: "5.0.8-S3"
+  config_date: "2026-09-18"
+  # Changelog:
+  #  v5.0.8-S3 - LONG-TERM STATISTICS: state_class: measurement added to the
+  #    4 Height sensors and the 9 roll/pitch instrumentation sensors (Suspension
+  #    Roll/Front/Rear, Road Cross-Slope, Chassis Twist, Max Roll Authority,
+  #    Suspension Pitch, Road Pitch-Slope, Max Pitch Authority) so HA keeps
+  #    their statistics past the 10-day recorder purge (travel analysis).
+  #    delta 0.15 filter ONLY on the 3 leaf sensors no lambda reads (Road
+  #    Cross-Slope, Chassis Twist, Road Pitch-Slope). NOT filtered: Heights
+  #    (guards + roll maths read .state), Suspension Roll/Front/Rear and
+  #    Suspension Pitch (read by the Cross-Slope/Twist/Pitch-Slope lambdas).
+  #    config_date 2026-07-11 -> 2026-09-18 (missed in v5.0.7). No control
+  #    logic changed.
+  #  v5.0.7-S3 - IMU Jitter sensor: update_interval 1s -> 60s + delta 0.05
+  #    filter (was 86,400 states/day, a v4.5.5 tuning leftover). Sensor only;
+  #    the compressor-shake logic reads the imu_jitter global, unchanged.
+  #    Built/flashed on ESPHome 2026.9.0 (device was on 2026.8.2).
+  #  v5.0.6-S3 - Status LED: rgb_order -> channel_colors (ESPHome deprecation,
+  #    the old key is removed in 2027.3.0). No behaviour change.
+  #  v5.0.5-S3 - PITCH equivalents of the v5.0.4 roll work: Suspension Pitch
+  #    (front axle vs rear axle over the AXLE SPACING), Road Pitch-Slope
+  #    (IMU pitch minus it) and Max Pitch Authority. New "Axle Spacing"
+  #    number (default 1.0 m - MEASURE IT). Because the axles sit much closer
+  #    together than the wheels, the same bag travel gives a far larger angle
+  #    in pitch than in roll (~8.3 deg at 1.0 m vs 4.2 deg at 2.0 m track).
+  #  v5.0.4-S3 - SUSPENSION ROLL instrumentation (spec Phase 1). Splits the
+  #    IMU roll into its two physical parts so suspension behaviour and
+  #    terrain can be judged separately:
+  #      Suspension Roll   - from the 4 height rulers (% -> cm per-corner
+  #                          calibration first!), bounded by geometry ~+/-4.2 deg
+  #      Road Cross-Slope  - IMU roll minus Suspension Roll
+  #      Roll Front / Rear + Chassis Twist - diagonal loading / frame flex
+  #      Max Roll Authority - derived from track width, not hard-coded
+  #    New "Track Width" number (default 2.0 m = WHEEL track; body is 1.8 m).
+  #    Guards: any corner >= 99.5 (the no-sensor sentinel) invalidates the
+  #    result instead of reporting a confident wrong angle.
+  #  v5.0.3-S3 - Air-tank + auto-maintain policy:
+  #    * Compressor latch cut-in 100 -> 110 psi (tank now runs 110 cut-in ->
+  #      ~150 cut-out, safety valve 175). The "Compressor Running" flash now
+  #      covers the WHOLE fill instead of stopping around 120-125 (which was
+  #      the old 120 psi cut-out).
+  #    * AUTO-MAINTAIN IS NOW MANUAL-ONLY. Leaving Off-Road no longer switches
+  #      it back on; nothing in the firmware turns it on. It stays
+  #      RESTORE_DEFAULT_OFF at boot, so only the user can enable it.
+  #  v5.0.2-S3 - Auto-Level first-burst-raise investigation/fix:
+  #    (a) auto_level now HARD-STOPS any apply_preset still running (maintain-
+  #        off alone never aborted an in-flight preset; it kept pulsing in
+  #        parallel and could fire a raise as leveling began - the only code
+  #        path that can command a raise with the high side free to lower).
+  #    (b) 2s settle delay before the first decision (no transient readings).
+  #    (c) Every burst logs "Level decide: r=.. p=.. do=N" so a wrong-way
+  #        pulse can be diagnosed from a single log line.
+  #  v5.0.1-S3 - Onboard RGB status LED (WS2812 @ GPIO48): RED = booted but not
+  #    connected to HA/WiFi; BLUE = connected to HA but manifold BLE down;
+  #    GREEN = HA + manifold both connected. 2s refresh, 25% brightness.
+  #  v5.0.0-S3 - HARDWARE PORT to ESP32-S3-N16R8 (16MB flash + 8MB octal PSRAM)
+  #    on a screw-terminal breakout. Board -> esp32-s3-devkitc-1 + psram(octal);
+  #    dropped the classic-ESP sram1_as_iram/min-chip-rev hack. PIN MOVES (2):
+  #    Manifold button GPIO27 -> GPIO15 (27 is flash on S3), I2C SCL GPIO22 ->
+  #    GPIO47 (S3 has no GPIO22). Unchanged: Air Manifold relay GPIO16, Load-
+  #    Sharing relay GPIO17, Load-Share button GPIO14, IMU SDA GPIO21, BMI160
+  #    @0x69. Re-run IMU calibration (offsets do not carry to a new chip).
+  #    All suspension logic identical to v4.5.12.
+  #  v4.5.12 - BUILD FIX for v4.5.11: the number-block splice cut
+  #    preset_psi_deadband short and orphaned its optimistic/mode/entity tail
+  #    onto the new "Preset PSI Deadband", giving it a duplicate "optimistic"
+  #    key (compile error). Restored the tail, de-duplicated, and gave the 10
+  #    PSI preset numbers the same mode/entity_category as the % ones. No
+  #    behaviour change vs the intended v4.5.11.
+  #  v4.5.11 - PSI-fallback preset toggle (step 2). New "Preset Mode PSI" switch
+  #    (OFF=ruler Height %, default; ON=air-bag PSI limp-home). apply_preset and
+  #    the Auto-Maintain supervisor are now dual-path: in PSI mode they drive/
+  #    hold the corner PSI sensors to a SEPARATE PSI target set (10 new "...PSI"
+  #    numbers) with its own "Preset PSI Deadband"; in Height mode unchanged.
+  #    Both target sets are remembered independently. A "Height Sensor Suspect"
+  #    fault now LATCHES the mode to PSI (manual switch back). Auto-Level is
+  #    untouched (still gyro). Dashboard shows the % or PSI slider set per toggle.
+  #  v4.5.10 - Compressor-running latch (new "Compressor Running" binary_sensor).
+  #    Mirrors the physical pressure switch: turns ON when the tank drops below
+  #    100 psi (cut-in), stays ON through the ENTIRE pump-up (even back up past
+  #    100, past 120, to an overshoot like 123), and turns OFF only when the
+  #    pressure stops climbing for 8s (stabilised at cutout). It does NOT stop at
+  #    a hardcoded 120, so raising the tank max later just makes it blink longer.
+  #    The dashboard blinks the Air Tank digits on this sensor instead of the old
+  #    raw "< 100" test (which wrongly stopped at 100 on the way up while the
+  #    pump was still running).
+  #  v4.5.9 - CRITICAL Auto-Level sign fix + slider limits:
+  #    * ROLL/PITCH DIRECTION WAS INVERTED. Telemetry + the validated dashboard
+  #      arrows prove left-low = NEGATIVE roll and nose-down = NEGATIVE pitch on
+  #      this trailer, but the code assumed the opposite (low_left=(r>0),
+  #      low_front=(p>0)). So with the left low it raised the RIGHT side to ~96%
+  #      (runaway). Fixed: low_left=(r<0), low_front=(p<0).
+  #    * AUTO-FLIP REMOVED. The run-local polarity flip only tripped on a >0.25
+  #      deg per-burst worsening; a slow wrong-way drift (~0.2 deg/burst) slipped
+  #      under it, so it never rescued the bad sign. Direction is now fixed by
+  #      the corrected base signs + your IMU Invert/Swap calibration - no runtime
+  #      learning (which caused poisoning in 4.5.1 and this miss in 4.5.8).
+  #    * Max Corner PSI ceiling 80 -> 90. Emergency cap default 80 -> 95.
+  #      Preset Height Deadband floor 1 -> 0.
+  #  v4.5.8 - Fable review follow-ups on the v4.5.7 leveling engine:
+  #    * level_rpol/level_ppol are now restore_value:no (reset to +1 each boot).
+  #      Pitch actuation changed axle-pairs->rear-only and the roll branch order
+  #      changed, so any polarity persisted from an older regime is meaningless
+  #      and could cause a spurious first-run flip. IMU sign is handled by the
+  #      Invert/Swap toggles; the run-local flip stays as an in-run safety.
+  #    * Travel gates aligned to the pulse scripts: high group is "out of down-
+  #      travel" at Min PSI or <=2% height, "out of up-travel" at Max PSI or
+  #      >=98% (were 3%/97%), so the decision and the actuator agree exactly.
+  #    All five v4.5.2/4.5.3 invariants verified intact: vent-first order,
+  #    poison-proof run-local polarity (raw fused, 2x-worsen, commit-on-Leveled),
+  #    pitch gated both directions, roll-priority re-entry, per-write PSI+height.
+  #  v4.5.7 - Auto-Level rewritten to match the owner's HAND method exactly:
+  #    ROLL: let the HIGH side DOWN first; only if the high side is out of
+  #      down-travel, RAISE the low side to match. (v4.5.4 did the opposite,
+  #      raise-low-first, which climbed to near-max on uneven ground and, with
+  #      the jockey pinning the nose, ended nose-down. Reverted.)
+  #    PITCH: the REAR chases the nose (jockey pins the nose): nose-down ->
+  #      lower rear, nose-up -> raise rear; rear out of travel -> "wind jockey".
+  #    Finish target = GYRO degrees. PSI *and* corner HEIGHT (cm/%) are BOTH
+  #      used as the travel-room test (was PSI-only), via canDn()/canUp()
+  #      helpers; dead-ruler 100 sentinel ignored per-corner. Ground too uneven
+  #      -> stop and name the ramp/jockey action instead of running to a stop.
+  #  v4.5.6 - Silenced the compile warning "format '%u' expects unsigned int
+  #    but argument has type uint32_t" on the notify-watchdog log line (cast
+  #    'since' to (unsigned)). Cosmetic only - no behaviour change from v4.5.5.
+  #  v4.5.5 - Compressor-vibration rejection (jitter-adaptive IMU fusion):
+  #    Telemetry showed roll/pitch swinging +/-0.5 deg ONLY while the chassis-
+  #    mounted compressor runs, which made Auto-Level chase a moving target.
+  #    The shake is translational (rattles the ACCEL) but barely rotational,
+  #    so gmag(gyro) stayed low and the filter used its light-damping path and
+  #    passed the hash through. Fix: a new accel-jitter metric (how far the raw
+  #    accel tilt sits from the fused value, smoothed) drives the fusion damping
+  #    - quiet = light (fast, no lag), vibrating = up to 0.97 (averages the
+  #    symmetric hash out so the angle holds steady). No wait/calm gate; Auto-
+  #    Level keeps running through a compressor cycle on a steady reading.
+  #    New "IMU Jitter" diagnostic sensor to watch/tune the threshold.
+  #  v4.5.4 - Auto-Level actually finishes pitch now (from real telemetry):
+  #    * STALL GATE FIX (the bug in the owner's screenshots): the old gate needed
+  #      each 3-pulse burst to improve the tilt by >=0.15 deg or it counted a
+  #      "stall" and quit at 20 -> "Level limit - travel". Raising the dumped
+  #      rear to correct pitch moves the angle far less than 0.15 deg/burst, so
+  #      it aborted before touching the rear even though the rear could raise
+  #      (proven: manual raise to ~42% levelled it). Now ANY real new low
+  #      resets the counter; it only aborts on genuine no-progress/oscillation
+  #      (no new low for 25 bursts). Travel limits still caught separately.
+  #    * ROLL = RAISE THE LOW SIDE (no more dump-first). Was venting the high
+  #      side, which dumped all four corners to the floor and then forced a
+  #      huge rebuild. Now it raises the low side to meet the high side (falls
+  #      back to venting only if the low side is already at Max PSI), keeping
+  #      ride height and matching how you level by hand. Pitch stays rear-only.
+  #  v4.5.3 - Auto-maintain trigger fix + rear-only pitch leveling:
+  #    * MAINTAIN FIX: the 15s maintain supervisor derived its targets from
+  #      globals (preset_front/rear_target) that are only written by
+  #      apply_preset - so after a boot/flash they were NaN and maintain did
+  #      NOTHING until you re-selected the mode (toggling the switch didn't
+  #      help). It now derives front/rear targets LIVE from the selected gear
+  #      each tick, so maintain works immediately after boot and after
+  #      toggling, with no need to re-apply the mode.
+  #    * PITCH = REAR BAGS ONLY (the owner's call). With the tongue on the jockey
+  #      wheel the nose height is fixed; the bags can only move the rear.
+  #      Auto-Level now corrects roll first (unchanged, works well), then
+  #      pitch by raising the rear (nose-up) or sitting the rear down
+  #      (nose-down) - it no longer wastes air venting the jockey-pinned
+  #      front. At a rear travel limit it says "wind jockey up/down".
+  #  v4.5.2 - AUTO-LEVEL POISON-PROOF + safety gates (sim-confirmed):
+  #    (1) auto_level polarity fix. Old logic flipped an axis whenever a
+  #        burst failed to IMPROVE by 0.2 deg and wrote it to FLASH
+  #        (level_rpol restore_value:yes). On this rig a 3-pulse burst
+  #        moves roll only ~0.1-0.26 deg (varies with tank psi via the OD4
+  #        line) and the imu_roll sensor has a delta:0.15 publish filter -
+  #        so a CORRECT slow action read as "no improvement", flipped, and
+  #        poisoned every later run. Monte-Carlo at the owner's psi/pulse: old
+  #        poisoned 296/400 runs. Fix: leveling reads the RAW FUSED IMU
+  #        (globals fused_roll/pitch, bypassing the delta filter); polarity
+  #        is run-local (seeded from flash) and flips ONLY after 2
+  #        consecutive bursts that WORSEN the axis by >0.25 deg; flash is
+  #        committed ONLY when a run ends Leveled -> 0/400 poisoned. A bad
+  #        run can never poison future runs; a truly inverted mount still
+  #        self-corrects in ~2 bursts.
+  #    (3) Pulse height envelope: raise blocked at >=98% ruler, lower at
+  #        <=2% (strap-out / bottom protection). PSI gates unchanged.
+  #    (4) auto_level now publishes "Level - stopped before level" when a
+  #        run ends unleveled (was silent).
+  #    (5) apply_preset travel-limit status fixed ("Preset - travel limit,
+  #        check load" - was copy-pasted "Level - travel limit").
+  #    (6) Height Sensor Suspect problem sensor (ruler ~100% + mid PSI for
+  #        30s = failed/unplugged, the 100 sentinel). Height loops also
+  #        treat >=99.5% as satisfied so a dead ruler can't dump a corner.
+  #    Off-Road ordering (review Claim 2) intentionally NOT changed: the owner
+  #    wants Off-Road to raise on the height rulers with the cross-link
+  #    valves OPEN. See notes on per-side control if it oscillates.
+  #   4.5.1 - Auto-Level reverted to the GYRO engine (targets IMU roll/pitch
+  #           = 0 = TRUE level). Equalizing ruler heights is wrong on uneven
+  #           ground (equal heights != level), so leveling uses the IMU;
+  #           the height sensors stay as dashboard/preset feedback. Presets +
+  #           auto-maintain remain HEIGHT-based (ride height on flat road).
+  #   4.5.0 - HEIGHT REFACTOR. Suspension mode presets, apply_preset, the
+  #           auto-maintain supervisor and the deadband now work on RULER
+  #           HEIGHT % (front/rear pair), not PSI. Each corner is driven to
+  #           its mode's target height; Min/Max Corner PSI remain the hard
+  #           safety envelope. Preset numbers renamed "...Height" (0-100%),
+  #           "Preset Height Deadband" (%). Auto-Level is now HEIGHT too:
+  #           it equalises the 4 ruler heights (= flat) and uses the IMU only
+  #           as a cross-check (flags "check ruler cal" if heights are equal
+  #           but the IMU still reads tilted). Min/Max PSI = hard envelope.
+  #   4.4.11- Air Bag Over/Under-pressure warnings now debounced (delayed_on
+  #           4s / delayed_off 2s) so the brief PSI spike during a valve pulse
+  #           no longer false-triggers them; they fire only on a sustained
+  #           condition. Underpressure threshold = Min Corner PSI slider.
+  #   4.4.10- Offroad Articulation button now flashes only while ENGAGING
+  #           (new "Articulation Settling" sensor, ~2s) then sits solid amber -
+  #           was flashing continuously. No control-logic change.
+  #   4.4.9 - Build-only: added esp32.framework.advanced minimum_chip_revision
+  #           "3.1" + sram1_as_iram true (smaller binary, +40KB IRAM). No
+  #           functional change.
+  #   4.4.8 - Mode <-> articulation link: selecting Off-Road mode auto-turns
+  #           ON Offroad Articulation (load sharing); any other mode turns it
+  #           OFF. Auto-maintain still follows the interlock (off while
+  #           articulating, on otherwise). Articulation stays manually
+  #           toggleable on non-Off-Road modes.
+  #   4.4.7 - Removed the Leveling Vent Floor slider (redundant): auto-level now
+  #           vents the high side down to Min Corner PSI and raises to Max
+  #           Corner PSI - those two are the only safety bounds. Same validated
+  #           down-first engine otherwise.
+  #   4.4.6 - AUTO LEVEL rewritten as simulation-validated DOWN-FIRST + VENT
+  #           FLOOR engine. Levels by cheapest direction (vent high side toward
+  #           the Leveling Vent Floor; raise low side from tank only if it
+  #           bottoms). Vent Floor slider spans keep-pressure(primed) <-> lowest
+  #           stance. Learn-once persistent mount polarity (level_rpol/ppol),
+  #           3-pulse bursts (beat IMU noise, no thrash), tank-sag wait, stall
+  #           detection -> ramp/jack, per-step motion wait. Level Threshold
+  #           slider now 0-0.5 (0 clamps to 0.05).
+  #   4.4.5 - AUTO LEVELING (one button). auto_level script: dump all
+  #           corners to the Min PSI floor, then raise to gyro-zero -
+  #           roll first (raise low side FL+RL / FR+RR), then pitch
+  #           (raise low axle). Adaptive direction off calibrated
+  #           imu_roll/imu_pitch (no hard-coded sign). PSI-gated,
+  #           stationary+connected+valves-closed start gate, announces
+  #           "use ramp/jack" if a raise hits Max PSI. Stop Mode aborts.
+  #           Maintain supervisor + gear-apply gated off while leveling.
+  #   4.4.4 - Off-Road <-> Auto-Maintain INTERLOCK (mutually exclusive, safe
+  #           order). Load Sharing ON: auto-maintain forced OFF, then side
+  #           valves open. Load Sharing OFF: valves close, settle 1.5s, then
+  #           auto-maintain re-enabled (only if manifold connected). Supervisor
+  #           also hard-gated to never run while Load Sharing is ON, so it can
+  #           never correct against an open shared volume. No other changes.
+  #   4.4.3 - Steady-at-rest tuning + orientation defaults. IMU fusion
+  #           still-state smoothing 0.35 -> 0.75 (cancels the ~0.2 deg accel
+  #           noise) and display deadband 0.05 -> 0.15 deg, so a parked
+  #           trailer reads a rock-steady angle instead of wandering.
+  #           Response still ~0.3-0.4s (no lag). Baked in the confirmed
+  #           orientation for this mount: Swap/Invert Roll/Invert Pitch now
+  #           default ON (RESTORE_DEFAULT_ON) so a fresh flash is correct.
+
+  #   4.4.2 - IMU real-time fix. Replaced the accel-only tilt (5-sample
+  #           average -> 10-20s display lag + jolt spikes) with a 10 Hz
+  #           gyro-gated complementary filter: fast-follows accel when
+  #           still (no lag), damps hard when the gyro sees motion (no
+  #           spikes). BMI160 now 100ms. Accel + gyro made INTERNAL (off
+  #           the HA entity list) plus removed IMU Temp / Pitch Offset /
+  #           Roll Offset - only Pitch & Roll remain. Calibrate + Invert/
+  #           Swap toggles still apply (they act on the fused value).
+
+  #   4.4.1 - Gen3 PSI Scale hardcoded to 1.45038 (0.01 MPa -> psi) and the
+  #           adjustable number entity removed - it's a fixed physical constant.
+
+  #   4.4.0 - (1) AXLE-PAIR RAISE: preset coarse phase now pulses FL+FR
+  #           then RL+RR with the single-corner commands (manifold ignores
+  #           the multi-bit 0x19/0x16 axle mask -> only moved one corner).
+  #           (2) Preset target floor 20 -> 0; the Min Corner PSI SLIDER
+  #           governs the real lowering limit (pulse_lower gates on it),
+  #           not a hardcoded number. Full Dump still airs to 0.
+  #           (3) Removed the whole auto-level subsystem (master enable,
+  #           continuous, Auto Level/Stop buttons, loop, supervisor, status
+  #           sensors, Trailer Level, globals). Kept IMU dials/calibrate/
+  #           toggles + Level Threshold. (4) Gen3 PSI Scale disabled_by_default.
+  #   4.3.0 - IMU FIX (roll drift). Sensor is wall-mounted with +X axis
+  #           VERTICAL (accel reads X~+9.8g, Y~-0.25g, Z~-1.6g = mount
+  #           tilt ~11deg). Old code referenced Z as "down" so roll =
+  #           atan2(ay,az) rode on tiny residuals -> noise + temp drift
+  #           (IMU 27->36C swung roll several deg while bolted still).
+  #           NOW X is the reference: pitch = atan2(pitch_comp, ax),
+  #           roll = atan2(roll_comp, ax) - well-conditioned, drift-free.
+  #           Same math in Pitch + Roll sensors AND the Calibrate button.
+  #           3 hidden (config) orientation toggles so the Y/Z->roll/pitch
+  #           assignment + signs are fixed by a 30s tilt test WITHOUT a
+  #           reflash: "IMU Swap Roll/Pitch", "IMU Invert Roll", "IMU
+  #           Invert Pitch". Invert flips only the final displayed sign
+  #           (0 stays 0), so it can be toggled without recalibrating;
+  #           after changing SWAP, recalibrate. Procedure: park LEVEL ->
+  #           set toggles via tilt test -> press Calibrate Level Zero once.
+  #   4.2.0 - Cleanup + logic. Removed Gen3 p-byte debug sensors, the
+  #           Diagnostic gate switch, Gear 1-5 buttons, Read-Settings +
+  #           Confirm-Gear buttons, and web_server. FIXED Auto Maintain
+  #           (supervisor interval restored). Min Corner PSI -> 0. NEW
+  #           preset logic: AXLE-FIRST coarse (move both fronts/both
+  #           rears together to ~3psi of target), THEN per-corner fine
+  #           trim to deadband - far less trailer rocking. Auto Maintain
+  #           uses the same. All serialized (one write at a time).
+  #   4.1.0 - HA presets re-enabled on Gen3 (mode select -> apply_preset)
+  #           but SERIALIZED: corners nudged one-at-a-time (750ms apart)
+  #           so no concurrent BLE writes (that caused the crash). Uses
+  #           correct Gen3 pulses + correct psi, so no runaway. Min
+  #           Corner PSI now adjustable to 0. New "Full Dump 0 psi"
+  #           button airs all corners out for maintenance (captured
+  #           axle-down cmds, Stop Preset also stops it). Nudge default
+  #           300ms for hold-to-repeat feel.
+  #   4.0.0  - REAL GEN3 PROTOCOL (decoded from DOWN3 app BLE capture).
+  #            Frame [type][sub][arg][cksum]. Corner/axle moves:
+  #            01 01 <arg> <cks>, arg = dir(1=up,2=dn)<<4 | corner
+  #            bits FL1 RL2 RR4 FR8. Each button press = pulse cmd,
+  #            wait "Corner Nudge ms", then RELEASE (01 01 00 02) =
+  #            one bounded nudge (no runaway). Gears 1-5 = 02 01 0N.
+  #            Keepalive 04 01 03 08 replaces the wrong Gen2 poll.
+  #            This is what the buttons SHOULD have sent all along.
+  #   3.13.0 - SAFETY + read fix. (1) All corner/axle valve DRIVE
+  #            commands gated behind "Diagnostic: Allow Valve Commands"
+  #            (OFF by default) - ESP monitor-only until Gen3 command
+  #            bytes are mapped (ESP lower raised all corners). Reads/
+  #            polls stay live. (2) PSI uses FLOOR + tunable "Gen3 PSI
+  #            Scale" (roundf read ~1 psi high vs remote).
+  #   3.12.0 - SAFETY: PSI scaling kept, but preset apply + auto-
+  #            maintain + emergency dump DISABLED again. They drove
+  #            corners with Gen3 command bytes that are NOT yet
+  #            verified (FL auto-inflated toward the Off-Road target).
+  #            Manual corner buttons only until commands are mapped.
+  #   3.11.0 - PSI UNIT FIX (verified via wired remote): DOWN3 reports
+  #            pressure in 0.01 MPa; psi = raw * 1.45038. Applied to
+  #            tank + 4 corners. FL confirmed = p6 (only it moved on
+  #            FL-up). Presets/auto-maintain/emergency dump now act on
+  #            true psi. Byte map (p6=FL,p7=RL,p8=RR,p9=FR) confirmed.
+  #   3.9.0 - Gen3 live frame DECODED (via DOWN 2.3 app + capture):
+  #           type 0x01: p0=gear p1=tank p2-5=heights(FL,RL,RR,FR)
+  #           p6-9=corner PSI(FL,RL,RR,FR). Real corner PSI + tank now
+  #           published. Height sensors exposed (100 = no sensors).
+  #           Emergency dump re-enabled on the real corner values.
+  #   3.8.0 - SAFETY: disable emergency auto-dump (was false-firing on
+  #           the height-gauge 100 values, spamming valve commands).
+  #           Expose full type-0x01 payload as p0..p9 for mapping.
+  #           Confirmed: p0=gear, p1=air tank. Corner PSI TBD via test.
+  #   3.7.0 - Gen3 frame decoder. DOWN3 streams multiple typed frames
+  #           [type][len][payload][checksum], NOT the Gen2 single 0x06
+  #           frame. Decodes type 0x01 as live data (best-guess gear/
+  #           tank/FL/RL/RR/FR) + exposes raw channels as diagnostics
+  #           to finish mapping. VALIDATE by moving a corner.
+  #   3.6.0 - REVERT to FFF0/FFF1/FFF2 (nRF Connect GATT dump proved
+  #           DOWN3 exposes these, not fee9/d44bc439). Cleaner notify
+  #           setup: on_connect waits for subscription, then polls.
+  #           camper_raw kept at DEBUG so raw FFF1 frames are visible.
+  #   3.5.0 - (wrong) tried fee9/d44bc439 from app - chars not on device.
+  #   3.4.0 - FIX compile error: ble_client.connect cannot be used
+  #           directly inside on_ble_advertise (ESPHome template
+  #           bug). Connect moved into a script; the advertise
+  #           trigger just executes it.
+  #   3.3.0 - IMU smoothing: pitch/roll get a 5-sample moving
+  #           average (~5s) + 0.15 deg deadband. Kills the
+  #           constant jitter on the dashboard dials; auto-level
+  #           unaffected (its threshold logic is unchanged).
+  #   3.2.0 - FIX stuck CONNECTING: DOWN3 uses a random-type BLE
+  #           address; connect must happen AFTER an advertisement
+  #           is seen. Connect is now triggered by the manifold's
+  #           own advertisement (10s retry guard) instead of blind
+  #           boot/interval connects.
+  #   3.1.0 - Manifold BLE Link switch: manual connect/disconnect of
+  #           the BLE link (frees the manifold for the phone app).
+  #           auto_connect off; 15s watchdog reconnects while the
+  #           link switch is ON.
+  #   3.0.0 - MAJOR: new manifold "DOWN3" (MAC XX:XX:XX:XX:XX:XX).
+  #           DOWN v3 has NO authentication - all password/login
+  #           writes removed (set password, login 1111, re-login
+  #           interval, debug auth buttons). Protocol otherwise
+  #           Gen3 UUIDs applied in 3.5.0 - validate corner
+  #           PSI + one pulse after flashing.
+  #   2.0.0 - MAJOR: height-sensor system fully removed (ADC sensors,
+  #           calibration, cm presets, drive scripts - ~50 entities).
+  #           GPIO34/35/36/39 freed. Presets are now PSI-based:
+  #           5 modes x Front/Rear PSI numbers (flash-persisted),
+  #           closed-loop apply with configurable +/-1 psi deadband.
+  #           NEW: Preset Auto Maintain switch - supervisor re-adjusts
+  #           pressures whenever they drift from the selected mode.
+  #           NEW: Preset Status text sensor (Idle/Applying/Reached/
+  #           Maintaining/Aborted). Gear selection now auto-applies.
+  #           Compressor relay renamed "Air Manifold",
+  #           restore_mode ALWAYS_ON (manifold powered after reboot).
+  #   1.4.1 - dashboard prefix corrected.
+  #   1.4.0 - FR/RL/RR calibration, relay inverted, sequential presets.
+  #   1.3.0 - height-based presets (removed in 2.0.0).
+  #   1.2.0 - relay + 2 physical buttons.
+  #   1.1.0 - IMU calibration, auto-level.
+  #   1.0.0 - baseline BLE manifold control.
+
+# ============================================================
+# DEVICE
+# ============================================================
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    priority: -100
+    then:
+      - text_sensor.template.publish:
+          id: preset_status
+          state: "Idle"
+
+esp32:
+  # v5.0.0 - ported to ESP32-S3-N16R8 (WROOM-1: 16MB flash + 8MB OCTAL PSRAM).
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+# 8MB octal PSRAM: heap headroom for BLE + WiFi + the growing sensor set
+# (the old sram1_as_iram hack is not needed on the S3).
+psram:
+  mode: octal
+  speed: 80MHz
+
+# v5.0.1 - onboard RGB status LED (WS2812 @ GPIO48). Driven by the status
+# interval below; not exposed to HA.
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    name: "Status LED"
+    internal: true
+    pin: GPIO48
+    num_leds: 1
+    channel_colors: GRB   # v5.0.6: rgb_order deprecated (removed in ESPHome 2027.3)
+    chipset: WS2812
+    default_transition_length: 0s
+    restore_mode: ALWAYS_OFF
+
+logger:
+  level: INFO
+  logs:
+    camper_raw: WARN
+    ble_sensor: WARN
+    esp32_ble_client: WARN
+    bmi160: WARN
+
+# ============================================================
+# API / OTA  (reboot_timeout: 0s -> trailer autonomy)
+# ============================================================
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    encryption:
+
+# ============================================================
+# WIFI  (AP fallback runs forever when no STA)
+# ============================================================
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  reboot_timeout: 0s
+  power_save_mode: none
+  output_power: 20.5dB
+  ap:
+    ssid: !secret ap_ssid
+    password: !secret ap_password
+
+captive_portal:
+
+# ============================================================
+# I2C  (BMI160 IMU on GPIO21/22)
+# ============================================================
+
+i2c:
+  sda: GPIO21
+  scl: GPIO47
+  scan: true
+  id: bus_a
+
+# ============================================================
+# GLOBALS
+# ============================================================
+
+globals:
+  - id: last_fff1_notify_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: last_ble_connect_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  - id: last_connect_try_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+
+  # IMU calibration offsets - survive reboot (flash).
+  - id: pitch_offset
+    type: float
+    restore_value: yes
+    initial_value: '0.0'
+
+  - id: roll_offset
+    type: float
+    restore_value: yes
+    initial_value: '0.0'
+
+  # v4.4.2 - gyro-fused tilt (raw, pre-offset), updated by 100ms interval.
+  - id: fused_pitch
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: fused_roll
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: fused_ready
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # v2.0.0 - PSI preset runtime state
+  - id: preset_front_target
+    type: float
+    restore_value: no
+    initial_value: 'NAN'
+
+  - id: preset_rear_target
+    type: float
+    restore_value: no
+    initial_value: 'NAN'
+  - id: preset_front_target_psi
+    type: float
+    restore_value: no
+    initial_value: 'NAN'
+  - id: preset_rear_target_psi
+    type: float
+    restore_value: no
+    initial_value: 'NAN'
+
+  - id: preset_iter
+    type: int
+    restore_value: no
+    initial_value: '0'
+
+  # True while apply_preset is running - keeps the auto-level
+  # supervisor and the maintain supervisor out of the way.
+  - id: preset_applying
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+  # v4.4.5 - AUTO LEVELING runtime state.
+  # leveling_active: true while the auto_level routine runs (gates the
+  #   maintain supervisor and gear-apply so they don't drive BLE at the
+  #   same time). imu_gmag: latest gyro magnitude (deg/s) for the
+  #   stationary start-gate. lvl_* : adaptive direction memory so the
+  #   routine converges without hard-coding the roll/pitch sign convention.
+  - id: leveling_active
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: imu_gmag
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  # v4.5.5 - running accel-vibration level (compressor shake detector)
+  - id: imu_jitter
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  # v4.5.10 - compressor-running latch (mirrors the physical ~100/120 pressure
+  # switch). ON when tank drops below 100 (cut-in); stays ON through the whole
+  # pump-up; OFF only when pressure stops climbing for 8s (stabilised at cutout -
+  # NOT hardcoded to 120, so raising the tank max later just works).
+  - id: compressor_on
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: tank_peak
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: tank_peak_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: '0'
+  # v4.4.6 - persistent learned mount polarity (survives reboot; +1/-1).
+  - id: level_rpol
+    type: int
+    restore_value: no
+    initial_value: '1'
+  - id: level_ppol
+    type: int
+    restore_value: no
+    initial_value: '1'
+  # per-run leveling state
+  - id: lvl_iter
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: lvl_stall
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: lvl_best
+    type: float
+    restore_value: no
+    initial_value: '1e9'
+  - id: lvl_sag
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: lvl_rflip
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: lvl_pflip
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  # v4.5.2 - run-local polarity + worsening streaks (poison-proof)
+  - id: lvl_run_rpol
+    type: int
+    restore_value: no
+    initial_value: '1'
+  - id: lvl_run_ppol
+    type: int
+    restore_value: no
+    initial_value: '1'
+  - id: lvl_rworse
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: lvl_pworse
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: lvl_do
+    type: int
+    restore_value: no
+    initial_value: '0'
+  - id: lvl_before
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+  - id: lvl_axis_roll
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  - id: lvl_acted_vent
+    type: bool
+    restore_value: no
+    initial_value: 'true'
+  - id: lvl_psi_before
+    type: float
+    restore_value: no
+    initial_value: '0.0'
+
+# ============================================================
+# BLE
+# ============================================================
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+    interval: 1100ms
+    window: 500ms
+  on_ble_advertise:
+    - mac_address: ${manifold_mac}
+      then:
+        - script.execute: ble_try_connect
+
+ble_client:
+  - mac_address: ${manifold_mac}
+    id: camper_manifold
+    auto_connect: false
+
+    on_connect:
+      then:
+        - logger.log: "CAMPER: BLE connected"
+        - binary_sensor.template.publish:
+            id: camper_manifold_connected
+            state: ON
+        - lambda: |-
+            id(last_ble_connect_ms) = millis();
+            id(last_fff1_notify_ms) = millis();
+
+        # Give ESPHome time to write the FFF1 CCCD (enable notify)
+        # before we ask the manifold to start reporting.
+        - delay: 2s
+        - ble_client.ble_write:
+            id: camper_manifold
+            service_uuid: ${svc_uuid}
+            characteristic_uuid: ${write_uuid}
+            value: [0x04, 0x01, 0x03, 0x08]   # Gen3 keepalive
+        - delay: 500ms
+        - ble_client.ble_write:
+            id: camper_manifold
+            service_uuid: ${svc_uuid}
+            characteristic_uuid: ${write_uuid}
+            value: [0x04, 0x01, 0x03, 0x08]  # Gen3 keepalive   # Status request
+        - delay: 500ms
+        - ble_client.ble_write:
+            id: camper_manifold
+            service_uuid: ${svc_uuid}
+            characteristic_uuid: ${write_uuid}
+            value: [0x04, 0x01, 0x03, 0x08]  # Gen3 keepalive   # Status request (retry)
+
+    on_disconnect:
+      then:
+        - logger.log: "CAMPER: BLE disconnected - clearing PSI"
+        - binary_sensor.template.publish:
+            id: camper_manifold_connected
+            state: OFF
+        - lambda: |-
+            const float NA = NAN;
+            id(camper_current_gear).publish_state(NA);
+            id(camper_air_tank_psi).publish_state(NA);
+            id(camper_suspension_front_left_psi).publish_state(NA);
+            id(camper_suspension_front_right_psi).publish_state(NA);
+            id(camper_suspension_rear_left_psi).publish_state(NA);
+            id(camper_suspension_rear_right_psi).publish_state(NA);
+
+# ============================================================
+# SCRIPTS - BLE pulses with PSI safety gates
+#
+#   pulse_*_raise : refuses if that corner is at/above Max Corner PSI
+#   pulse_*_lower : refuses if that corner is at/below Min Corner PSI
+#   Axle/pair scripts check BOTH corners.
+#   These gates apply to manual buttons, auto-level AND presets.
+# ============================================================
+
+script:
+  # v3.4.0 - called on every DOWN3 advertisement; connects when the
+  # link switch is ON, not yet connected, and >10s since last try.
+  - id: ble_try_connect
+    mode: single
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_on: manifold_ble_link
+              - binary_sensor.is_off: camper_manifold_connected
+              - lambda: 'return millis() - id(last_connect_try_ms) > 10000;'
+          then:
+            - lambda: 'id(last_connect_try_ms) = millis();'
+            - logger.log: "CAMPER: DOWN3 advertisement seen - connecting"
+            - ble_client.connect: camper_manifold
+
+  - id: status_request
+    mode: restart
+    then:
+      - ble_client.ble_write:
+          id: camper_manifold
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${write_uuid}
+          value: [0x04, 0x01, 0x03, 0x08]  # Gen3 keepalive
+
+  # ---- INDIVIDUAL CORNER PULSES ----
+
+  - id: pulse_fl_raise
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_front_left_psi).state) || id(camper_suspension_front_left_psi).state < id(max_corner_psi).state) && (isnan(id(camper_height_fl).state) || id(camper_height_fl).state < 98.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x11, 0x13]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Front Left raise (limit reached)"
+  - id: pulse_fl_lower
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_front_left_psi).state) || id(camper_suspension_front_left_psi).state > id(min_corner_psi).state) && (isnan(id(camper_height_fl).state) || id(camper_height_fl).state > 2.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x21, 0x23]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Front Left lower (limit reached)"
+  - id: pulse_fr_raise
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_front_right_psi).state) || id(camper_suspension_front_right_psi).state < id(max_corner_psi).state) && (isnan(id(camper_height_fr).state) || id(camper_height_fr).state < 98.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x18, 0x1A]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Front Right raise (limit reached)"
+  - id: pulse_fr_lower
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_front_right_psi).state) || id(camper_suspension_front_right_psi).state > id(min_corner_psi).state) && (isnan(id(camper_height_fr).state) || id(camper_height_fr).state > 2.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x28, 0x2A]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Front Right lower (limit reached)"
+  - id: pulse_rl_raise
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_rear_left_psi).state) || id(camper_suspension_rear_left_psi).state < id(max_corner_psi).state) && (isnan(id(camper_height_rl).state) || id(camper_height_rl).state < 98.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x12, 0x14]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Rear Left raise (limit reached)"
+  - id: pulse_rl_lower
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_rear_left_psi).state) || id(camper_suspension_rear_left_psi).state > id(min_corner_psi).state) && (isnan(id(camper_height_rl).state) || id(camper_height_rl).state > 2.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x22, 0x24]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Rear Left lower (limit reached)"
+  - id: pulse_rr_raise
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_rear_right_psi).state) || id(camper_suspension_rear_right_psi).state < id(max_corner_psi).state) && (isnan(id(camper_height_rr).state) || id(camper_height_rr).state < 98.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x14, 0x16]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Rear Right raise (limit reached)"
+  - id: pulse_rr_lower
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_rear_right_psi).state) || id(camper_suspension_rear_right_psi).state > id(min_corner_psi).state) && (isnan(id(camper_height_rr).state) || id(camper_height_rr).state > 2.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x24, 0x26]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Rear Right lower (limit reached)"
+  - id: pulse_front_axle_raise
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_front_left_psi).state)||id(camper_suspension_front_left_psi).state<id(max_corner_psi).state)&&(isnan(id(camper_suspension_front_right_psi).state)||id(camper_suspension_front_right_psi).state<id(max_corner_psi).state)&&(isnan(id(camper_height_fl).state)||id(camper_height_fl).state<98.0f)&&(isnan(id(camper_height_fr).state)||id(camper_height_fr).state<98.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x19, 0x1B]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Front Axle raise (limit reached)"
+  - id: pulse_front_axle_lower
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_front_left_psi).state)||id(camper_suspension_front_left_psi).state>id(min_corner_psi).state)&&(isnan(id(camper_suspension_front_right_psi).state)||id(camper_suspension_front_right_psi).state>id(min_corner_psi).state)&&(isnan(id(camper_height_fl).state)||id(camper_height_fl).state>2.0f)&&(isnan(id(camper_height_fr).state)||id(camper_height_fr).state>2.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x29, 0x2B]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Front Axle lower (limit reached)"
+  - id: pulse_rear_axle_raise
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_rear_left_psi).state)||id(camper_suspension_rear_left_psi).state<id(max_corner_psi).state)&&(isnan(id(camper_suspension_rear_right_psi).state)||id(camper_suspension_rear_right_psi).state<id(max_corner_psi).state)&&(isnan(id(camper_height_rl).state)||id(camper_height_rl).state<98.0f)&&(isnan(id(camper_height_rr).state)||id(camper_height_rr).state<98.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x16, 0x18]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Rear Axle raise (limit reached)"
+  - id: pulse_rear_axle_lower
+    mode: single
+    then:
+      - if:
+          condition:
+            lambda: 'return (isnan(id(camper_suspension_rear_left_psi).state)||id(camper_suspension_rear_left_psi).state>id(min_corner_psi).state)&&(isnan(id(camper_suspension_rear_right_psi).state)||id(camper_suspension_rear_right_psi).state>id(min_corner_psi).state)&&(isnan(id(camper_height_rl).state)||id(camper_height_rl).state>2.0f)&&(isnan(id(camper_height_rr).state)||id(camper_height_rr).state>2.0f);'
+          then:
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x26, 0x28]
+            - delay: !lambda 'return (uint32_t) id(nudge_ms).state;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+          else:
+            - logger.log: "BLOCK Rear Axle lower (limit reached)"
+
+  # v4.5.0 - HEIGHT-based preset. Each corner is driven to its mode's target
+  # HEIGHT % (front corners -> front target, rear -> rear target) using the
+  # ruler sensors; raising always increases height so no sign ambiguity.
+  # Min/Max Corner PSI stay as the hard envelope (the pulse scripts gate on
+  # them). Deadband (preset_psi_deadband, repurposed) is now in height %.
+  - id: apply_preset
+    mode: restart
+    then:
+      - lambda: |-
+          // v4.5.11: Height% mode (default) OR PSI mode (preset_mode_psi ON).
+          std::string sel = std::string(id(camper_gear_select).current_option());
+          bool psi = id(preset_mode_psi).state;
+          float f = NAN, r = NAN;
+          if (psi) {
+            if (sel=="Highway Normal Load"){f=id(preset_hwy_norm_front_psi).state;r=id(preset_hwy_norm_rear_psi).state;}
+            else if(sel=="Highway Heavy Load"){f=id(preset_hwy_heavy_front_psi).state;r=id(preset_hwy_heavy_rear_psi).state;}
+            else if(sel=="Off-Road"){f=id(preset_offroad_front_psi).state;r=id(preset_offroad_rear_psi).state;}
+            else if(sel=="Parked"){f=id(preset_parked_front_psi).state;r=id(preset_parked_rear_psi).state;}
+            else if(sel=="Easy Maneuver"){f=id(preset_easy_front_psi).state;r=id(preset_easy_rear_psi).state;}
+            id(preset_front_target_psi)=f; id(preset_rear_target_psi)=r;
+          } else {
+            if (sel=="Highway Normal Load"){f=id(preset_hwy_norm_front).state;r=id(preset_hwy_norm_rear).state;}
+            else if(sel=="Highway Heavy Load"){f=id(preset_hwy_heavy_front).state;r=id(preset_hwy_heavy_rear).state;}
+            else if(sel=="Off-Road"){f=id(preset_offroad_front).state;r=id(preset_offroad_rear).state;}
+            else if(sel=="Parked"){f=id(preset_parked_front).state;r=id(preset_parked_rear).state;}
+            else if(sel=="Easy Maneuver"){f=id(preset_easy_front).state;r=id(preset_easy_rear).state;}
+            id(preset_front_target)=f; id(preset_rear_target)=r;
+          }
+          id(preset_iter) = 0;
+          if (isnan(f) || isnan(r)) { id(preset_status).publish_state("Aborted - No targets"); return; }
+          if (id(load_sharing_relay).state) { ESP_LOGW("camper","Load sharing ON - corners linked; preset won't settle per-corner"); }
+          id(preset_applying) = true;
+          id(preset_status).publish_state(std::string("Applying ") + sel + (psi?" (PSI)":""));
+      - while:
+          condition:
+            lambda: |-
+              if (id(preset_iter) >= 90) return false;
+              if (!id(camper_manifold_connected).state) return false;
+              bool psi=id(preset_mode_psi).state;
+              float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state; if(isnan(db))db=2.0f;
+              float ft=psi?id(preset_front_target_psi):id(preset_front_target);
+              float rt=psi?id(preset_rear_target_psi):id(preset_rear_target);
+              if (isnan(ft)||isnan(rt)) return false;
+              float fl=psi?id(camper_suspension_front_left_psi).state:id(camper_height_fl).state;
+              float fr=psi?id(camper_suspension_front_right_psi).state:id(camper_height_fr).state;
+              float rl=psi?id(camper_suspension_rear_left_psi).state:id(camper_height_rl).state;
+              float rr=psi?id(camper_suspension_rear_right_psi).state:id(camper_height_rr).state;
+              if (isnan(fl)||isnan(fr)||isnan(rl)||isnan(rr)) return false;
+              return fabsf(fl-ft)>db||fabsf(fr-ft)>db||fabsf(rl-rt)>db||fabsf(rr-rt)>db;
+          then:
+            - lambda: 'id(preset_iter)++;'
+            - if:
+                condition:
+                  lambda: 'bool psi=id(preset_mode_psi).state;float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state;if(isnan(db))db=2.0f;float t=psi?id(preset_front_target_psi):id(preset_front_target);float v=psi?id(camper_suspension_front_left_psi).state:id(camper_height_fl).state;if(!psi&&v>=99.5f)return false;return !isnan(v)&&!isnan(t)&&v<t-db;'
+                then:
+                  - script.execute: pulse_fl_raise
+                  - delay: 800ms
+            - if:
+                condition:
+                  lambda: 'bool psi=id(preset_mode_psi).state;float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state;if(isnan(db))db=2.0f;float t=psi?id(preset_front_target_psi):id(preset_front_target);float v=psi?id(camper_suspension_front_left_psi).state:id(camper_height_fl).state;if(!psi&&v>=99.5f)return false;return !isnan(v)&&!isnan(t)&&v>t+db;'
+                then:
+                  - script.execute: pulse_fl_lower
+                  - delay: 800ms
+            - if:
+                condition:
+                  lambda: 'bool psi=id(preset_mode_psi).state;float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state;if(isnan(db))db=2.0f;float t=psi?id(preset_front_target_psi):id(preset_front_target);float v=psi?id(camper_suspension_front_right_psi).state:id(camper_height_fr).state;if(!psi&&v>=99.5f)return false;return !isnan(v)&&!isnan(t)&&v<t-db;'
+                then:
+                  - script.execute: pulse_fr_raise
+                  - delay: 800ms
+            - if:
+                condition:
+                  lambda: 'bool psi=id(preset_mode_psi).state;float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state;if(isnan(db))db=2.0f;float t=psi?id(preset_front_target_psi):id(preset_front_target);float v=psi?id(camper_suspension_front_right_psi).state:id(camper_height_fr).state;if(!psi&&v>=99.5f)return false;return !isnan(v)&&!isnan(t)&&v>t+db;'
+                then:
+                  - script.execute: pulse_fr_lower
+                  - delay: 800ms
+            - if:
+                condition:
+                  lambda: 'bool psi=id(preset_mode_psi).state;float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state;if(isnan(db))db=2.0f;float t=psi?id(preset_rear_target_psi):id(preset_rear_target);float v=psi?id(camper_suspension_rear_left_psi).state:id(camper_height_rl).state;if(!psi&&v>=99.5f)return false;return !isnan(v)&&!isnan(t)&&v<t-db;'
+                then:
+                  - script.execute: pulse_rl_raise
+                  - delay: 800ms
+            - if:
+                condition:
+                  lambda: 'bool psi=id(preset_mode_psi).state;float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state;if(isnan(db))db=2.0f;float t=psi?id(preset_rear_target_psi):id(preset_rear_target);float v=psi?id(camper_suspension_rear_left_psi).state:id(camper_height_rl).state;if(!psi&&v>=99.5f)return false;return !isnan(v)&&!isnan(t)&&v>t+db;'
+                then:
+                  - script.execute: pulse_rl_lower
+                  - delay: 800ms
+            - if:
+                condition:
+                  lambda: 'bool psi=id(preset_mode_psi).state;float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state;if(isnan(db))db=2.0f;float t=psi?id(preset_rear_target_psi):id(preset_rear_target);float v=psi?id(camper_suspension_rear_right_psi).state:id(camper_height_rr).state;if(!psi&&v>=99.5f)return false;return !isnan(v)&&!isnan(t)&&v<t-db;'
+                then:
+                  - script.execute: pulse_rr_raise
+                  - delay: 800ms
+            - if:
+                condition:
+                  lambda: 'bool psi=id(preset_mode_psi).state;float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state;if(isnan(db))db=2.0f;float t=psi?id(preset_rear_target_psi):id(preset_rear_target);float v=psi?id(camper_suspension_rear_right_psi).state:id(camper_height_rr).state;if(!psi&&v>=99.5f)return false;return !isnan(v)&&!isnan(t)&&v>t+db;'
+                then:
+                  - script.execute: pulse_rr_lower
+                  - delay: 800ms
+            - script.execute: status_request
+            - delay: 600ms
+      - lambda: |-
+          std::string sel = std::string(id(camper_gear_select).current_option());
+          bool psi=id(preset_mode_psi).state;
+          float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state; if(isnan(db))db=2.0f;
+          float ft=psi?id(preset_front_target_psi):id(preset_front_target);
+          float rt=psi?id(preset_rear_target_psi):id(preset_rear_target);
+          float fl=psi?id(camper_suspension_front_left_psi).state:id(camper_height_fl).state;
+          float fr=psi?id(camper_suspension_front_right_psi).state:id(camper_height_fr).state;
+          float rl=psi?id(camper_suspension_rear_left_psi).state:id(camper_height_rl).state;
+          float rr=psi?id(camper_suspension_rear_right_psi).state:id(camper_height_rr).state;
+          bool ok = !isnan(ft)&&!isnan(rt)&&!isnan(fl)&&!isnan(fr)&&!isnan(rl)&&!isnan(rr)&&
+                    fabsf(fl-ft)<=db&&fabsf(fr-ft)<=db&&fabsf(rl-rt)<=db&&fabsf(rr-rt)<=db;
+          std::string tag = psi?" (PSI)":"";
+          if (ok) {
+            if (id(preset_auto_maintain).state) id(preset_status).publish_state(std::string("Maintaining ")+sel+tag);
+            else id(preset_status).publish_state(std::string("Reached ")+sel+tag);
+          } else if (isnan(ft)||isnan(rt)) {
+          } else if (!id(camper_manifold_connected).state) { id(preset_status).publish_state("Aborted - Disconnected"); }
+          else if (id(preset_iter) >= 90) { id(preset_status).publish_state("Preset - travel limit, check load"); }
+          else { id(preset_status).publish_state("Aborted - Sensor data missing"); }
+          id(preset_applying) = false;
+
+  # ---- AUTO LEVEL v4.4.6: DOWN-FIRST + VENT-FLOOR, learn-once polarity ----
+  #  Simulation-validated engine (see CHANGELOG). Instead of dumping all four
+  #  corners, it levels by the cheapest direction from where the bags sit:
+  #    * vent the HIGH side/end down toward MIN PSI (free, no pump),
+  #    * only RAISE the low side/end from the tank if the high side bottoms out.
+  #  Min PSI and Max PSI are the only bounds (Min keeps bag shape / lowest
+  #  stance; Max is the inflate ceiling). Roll uses side-pairs, pitch uses
+  #  axle-pairs. Direction is LEARNED ONCE per axis (persisted level_rpol/ppol):
+  #  it acts in 3-pulse bursts and, if a burst makes the angle worse while the
+  #  pair is NOT saturated, flips that axis's polarity a single time. Bursts
+  #  beat the IMU noise floor, so it never thrashes. Guards: per-step motion
+  #  wait, tank-sag detection (waits for the compressor instead of flipping),
+  #  stall detection (no progress -> "use ramp/jack"), per-corner PSI clamp.
+  #  Start-gate: connected + valves closed + stationary + IMU ready.
+  #  Abort: Stop Mode or turning Off-Road on.
+  # ---- AUTO LEVEL v4.4.6: DOWN-FIRST + VENT-FLOOR, learn-once polarity ----
+  #  Simulation-validated engine (see CHANGELOG). Instead of dumping all four
+  #  corners, it levels by the cheapest direction from where the bags sit:
+  #    * vent the HIGH side/end down toward MIN PSI (free, no pump),
+  #    * only RAISE the low side/end from the tank if the high side bottoms out.
+  #  Min PSI and Max PSI are the only bounds (Min keeps bag shape / lowest
+  #  stance; Max is the inflate ceiling). Roll uses side-pairs, pitch uses
+  #  axle-pairs. Direction is LEARNED ONCE per axis (persisted level_rpol/ppol):
+  #  it acts in 3-pulse bursts and, if a burst makes the angle worse while the
+  #  pair is NOT saturated, flips that axis's polarity a single time. Bursts
+  #  beat the IMU noise floor, so it never thrashes. Guards: per-step motion
+  #  wait, tank-sag detection (waits for the compressor instead of flipping),
+  #  stall detection (no progress -> "use ramp/jack"), per-corner PSI clamp.
+  #  Start-gate: connected + valves closed + stationary + IMU ready.
+  #  Abort: Stop Mode or turning Off-Road on.
+  # ---- AUTO LEVEL v4.5.2: DOWN-FIRST, poison-proof polarity ----
+  #  Levels to the GYRO (IMU roll/pitch=0 = true level); height rulers
+  #  are feedback only. Vents the HIGH side toward Min Corner PSI (free);
+  #  raises the LOW side from tank only if the high side bottoms.
+  #  Decisions read the RAW FUSED IMU (bypass the sensor delta filter).
+  #  Polarity is run-local (seeded from persisted level_rpol/ppol); it
+  #  flips ONLY after 2 consecutive bursts that WORSEN the axis by
+  #  >0.25 deg. Flash polarity is committed ONLY when a run ends Leveled,
+  #  so a bad run can never poison future runs. Inverted mounts still
+  #  self-correct in ~2 bursts.
+  - id: auto_level
+    mode: single
+    then:
+      - if:
+          condition:
+            or:
+              - binary_sensor.is_off: camper_manifold_connected
+              - switch.is_on: load_sharing_relay
+              - lambda: 'return id(imu_gmag) > 4.0f;'
+              - lambda: 'return !id(fused_ready);'
+          then:
+            - lambda: |-
+                if (!id(camper_manifold_connected).state) id(preset_status).publish_state("Level aborted - Disconnected");
+                else if (id(load_sharing_relay).state) id(preset_status).publish_state("Level aborted - Close Off-Road first");
+                else if (id(imu_gmag) > 4.0f) id(preset_status).publish_state("Level aborted - Trailer moving");
+                else id(preset_status).publish_state("Level aborted - IMU not ready");
+          else:
+            - lambda: |-
+                id(leveling_active) = true; id(preset_applying) = true;
+                id(lvl_iter)=0; id(lvl_stall)=0; id(lvl_best)=1e9f; id(lvl_sag)=0;
+                id(lvl_rworse)=0; id(lvl_pworse)=0;
+                id(lvl_run_rpol)=id(level_rpol); id(lvl_run_ppol)=id(level_ppol);
+            - switch.turn_off: preset_auto_maintain
+            # v5.0.2: hard-stop any preset run still in flight (maintain-off alone
+            # does NOT abort a running apply_preset - it kept pulsing in parallel
+            # and could fire a RAISE right as leveling began).
+            - script.stop: apply_preset
+            - text_sensor.template.publish:
+                id: preset_status
+                state: "Leveling - working"
+            # v5.0.2: let the IMU fully settle before the first decision.
+            - delay: 2s
+            - while:
+                condition:
+                  lambda: |-
+                    if(!id(leveling_active)) return false;
+                    if(id(lvl_iter)>=90) return false;
+                    if(!id(camper_manifold_connected).state) return false;
+                    if(!id(fused_ready)) return false;
+                    float thr=id(level_threshold).state; if(isnan(thr)) thr=0.3f; if(thr<0.05f) thr=0.05f;
+                    float r=id(fused_roll)-id(roll_offset);  if(id(imu_invert_roll).state)  r=-r;
+                    float p=id(fused_pitch)-id(pitch_offset); if(id(imu_invert_pitch).state) p=-p;
+                    return fabsf(r)>thr || fabsf(p)>thr;
+                then:
+                  - wait_until:
+                      condition:
+                        lambda: 'return id(imu_gmag) < 4.0f || !id(leveling_active);'
+                      timeout: 10s
+                  - lambda: |-
+                      id(lvl_do)=0;
+                      float thr=id(level_threshold).state; if(isnan(thr)) thr=0.3f; if(thr<0.05f) thr=0.05f;
+                      float r=id(fused_roll)-id(roll_offset);  if(id(imu_invert_roll).state)  r=-r;
+                      float p=id(fused_pitch)-id(pitch_offset); if(id(imu_invert_pitch).state) p=-p;
+                      if(isnan(r)||isnan(p)) return;
+                      float ar=fabsf(r), ap=fabsf(p);
+                      float err=ar+ap;
+                      // v4.5.4: ANY real new low resets the stall counter, so slow-but-
+                      // steady progress (e.g. raising the rear to fix pitch, which moves
+                      // the angle far less than 0.15 deg per burst) is NOT mistaken for a
+                      // stall. Only true no-progress / oscillation (no new low for 25
+                      // bursts) aborts. Travel limits are caught separately below.
+                      if(err < id(lvl_best)-0.01f){ id(lvl_best)=err; id(lvl_stall)=0; }
+                      else { id(lvl_stall)=id(lvl_stall)+1; }
+                      if(id(lvl_stall)>25){ id(preset_status).publish_state("Level - can't settle, use ramp/jack"); id(leveling_active)=false; return; }
+                      float vf=id(min_corner_psi).state; if(isnan(vf)) vf=20.0f;
+                      float mx=id(max_corner_psi).state;
+                      float fl=id(camper_suspension_front_left_psi).state, fr=id(camper_suspension_front_right_psi).state;
+                      float rl=id(camper_suspension_rear_left_psi).state, rr=id(camper_suspension_rear_right_psi).state;
+                      if(isnan(fl)||isnan(fr)||isnan(rl)||isnan(rr)) return;
+                      id(lvl_psi_before)=fl+fr+rl+rr;
+                      // v4.5.7: corner heights = travel room (cm/% side). 100 = dead
+                      // ruler sentinel -> ignore height for that corner (PSI-only).
+                      float hfl=id(camper_height_fl).state, hfr=id(camper_height_fr).state;
+                      float hrl=id(camper_height_rl).state, hrr=id(camper_height_rr).state;
+                      // room to go DOWN (not at Min PSI and not on the floor) / UP.
+                      auto canDn=[&](float ps,float h){ return (ps>vf+0.5f) && (isnan(h)||h>=99.5f||h>2.0f); };
+                      auto canUp=[&](float ps,float h){ return (ps<mx)       && (isnan(h)||h>=99.5f||h<98.0f); };
+                      bool roll = ar>thr;
+                      id(lvl_axis_roll)=roll;
+                      if(roll){
+                        // v4.5.7 (the owner's method): let the HIGH side DOWN first; only if the
+                        // high side is out of down-travel, RAISE the LOW side to match.
+                        bool low_left=(r<0);  // v4.5.9: left-low = NEGATIVE roll (matches validated arrows); auto-flip removed
+                        id(lvl_before)=ar;
+                        if(low_left){
+                          // left low, RIGHT high -> lower right (FR+RR); else raise left (FL+RL)
+                          if(canDn(fr,hfr)||canDn(rr,hrr)){ id(lvl_do)=2; id(lvl_acted_vent)=true; }
+                          else if(canUp(fl,hfl)||canUp(rl,hrl)){ id(lvl_do)=3; id(lvl_acted_vent)=false; }
+                          else { id(preset_status).publish_state("Roll limit - add ramp under low (left) side"); id(leveling_active)=false; }
+                        } else {
+                          // right low, LEFT high -> lower left (FL+RL); else raise right (FR+RR)
+                          if(canDn(fl,hfl)||canDn(rl,hrl)){ id(lvl_do)=1; id(lvl_acted_vent)=true; }
+                          else if(canUp(fr,hfr)||canUp(rr,hrr)){ id(lvl_do)=4; id(lvl_acted_vent)=false; }
+                          else { id(preset_status).publish_state("Roll limit - add ramp under low (right) side"); id(leveling_active)=false; }
+                        }
+                      } else {
+                        // v4.5.7: PITCH - the REAR chases the nose (jockey pins the nose).
+                        // Nose-DOWN (nose low) -> lower rear; Nose-UP (nose high) -> raise rear.
+                        // Rear out of travel -> tell the owner to wind the jockey.
+                        bool low_front=(p<0);  // v4.5.9: nose-down = NEGATIVE pitch (matches validated arrows); auto-flip removed
+                        id(lvl_before)=ap;
+                        if(low_front){
+                          if(canDn(rl,hrl)||canDn(rr,hrr)){ id(lvl_do)=6; id(lvl_acted_vent)=true; }
+                          else { id(preset_status).publish_state("Nose down - rear at limit, wind jockey UP"); id(leveling_active)=false; }
+                        } else {
+                          if(canUp(rl,hrl)||canUp(rr,hrr)){ id(lvl_do)=8; id(lvl_acted_vent)=false; }
+                          else { id(preset_status).publish_state("Nose up - rear at limit, wind jockey DOWN"); id(leveling_active)=false; }
+                        }
+                      }
+                  - lambda: |-
+                      // v5.0.2: log exactly what the engine saw and chose.
+                      float lr=id(fused_roll)-id(roll_offset);  if(id(imu_invert_roll).state)  lr=-lr;
+                      float lp=id(fused_pitch)-id(pitch_offset); if(id(imu_invert_pitch).state) lp=-lp;
+                      ESP_LOGI("camper","Level decide: r=%.2f p=%.2f do=%d (1=lowL 2=lowR 3=raiseL 4=raiseR 6=lowRear 8=raiseRear)",
+                               lr, lp, id(lvl_do));
+                  - if:
+                      condition: { lambda: 'return id(lvl_do)==1;' }
+                      then:
+                        - repeat: { count: 3, then: [ { script.execute: pulse_fl_lower }, { delay: 800ms }, { script.execute: pulse_rl_lower }, { delay: 800ms } ] }
+                  - if:
+                      condition: { lambda: 'return id(lvl_do)==2;' }
+                      then:
+                        - repeat: { count: 3, then: [ { script.execute: pulse_fr_lower }, { delay: 800ms }, { script.execute: pulse_rr_lower }, { delay: 800ms } ] }
+                  - if:
+                      condition: { lambda: 'return id(lvl_do)==3;' }
+                      then:
+                        - repeat: { count: 3, then: [ { script.execute: pulse_fl_raise }, { delay: 800ms }, { script.execute: pulse_rl_raise }, { delay: 800ms } ] }
+                  - if:
+                      condition: { lambda: 'return id(lvl_do)==4;' }
+                      then:
+                        - repeat: { count: 3, then: [ { script.execute: pulse_fr_raise }, { delay: 800ms }, { script.execute: pulse_rr_raise }, { delay: 800ms } ] }
+                  - if:
+                      condition: { lambda: 'return id(lvl_do)==5;' }
+                      then:
+                        - repeat: { count: 3, then: [ { script.execute: pulse_fl_lower }, { delay: 800ms }, { script.execute: pulse_fr_lower }, { delay: 800ms } ] }
+                  - if:
+                      condition: { lambda: 'return id(lvl_do)==6;' }
+                      then:
+                        - repeat: { count: 3, then: [ { script.execute: pulse_rl_lower }, { delay: 800ms }, { script.execute: pulse_rr_lower }, { delay: 800ms } ] }
+                  - if:
+                      condition: { lambda: 'return id(lvl_do)==7;' }
+                      then:
+                        - repeat: { count: 3, then: [ { script.execute: pulse_fl_raise }, { delay: 800ms }, { script.execute: pulse_fr_raise }, { delay: 800ms } ] }
+                  - if:
+                      condition: { lambda: 'return id(lvl_do)==8;' }
+                      then:
+                        - repeat: { count: 3, then: [ { script.execute: pulse_rl_raise }, { delay: 800ms }, { script.execute: pulse_rr_raise }, { delay: 800ms } ] }
+                  - delay: 400ms
+                  - script.execute: status_request
+                  - delay: 400ms
+                  - lambda: |-
+                      id(lvl_iter)=id(lvl_iter)+1;
+                      if(id(lvl_do)==0) return;
+                      bool roll=id(lvl_axis_roll);
+                      float now;
+                      { float r=id(fused_roll)-id(roll_offset);  if(id(imu_invert_roll).state)  r=-r;
+                        float p=id(fused_pitch)-id(pitch_offset); if(id(imu_invert_pitch).state) p=-p;
+                        now = roll ? fabsf(r) : fabsf(p); }
+                      if(isnan(now)) return;
+                      float fl=id(camper_suspension_front_left_psi).state, fr=id(camper_suspension_front_right_psi).state;
+                      float rl=id(camper_suspension_rear_left_psi).state, rr=id(camper_suspension_rear_right_psi).state;
+                      float psi_now=fl+fr+rl+rr;
+                      bool moved = fabsf(psi_now - id(lvl_psi_before)) > 1.0f;
+                      if(!id(lvl_acted_vent) && !moved){
+                        id(lvl_sag)=id(lvl_sag)+1;
+                        if(id(lvl_sag)>20){ id(preset_status).publish_state("Level - low air, charge tank"); id(leveling_active)=false; }
+                        else id(preset_status).publish_state("Leveling - waiting for air");
+                        return;
+                      }
+                      id(lvl_sag)=0;
+                      if(moved){
+                        bool worsened = now > id(lvl_before) + 0.25f;
+                        bool improved = now < id(lvl_before) - 0.10f;
+                        if(roll){
+                          if(worsened){ id(lvl_rworse)=id(lvl_rworse)+1;
+                            if(id(lvl_rworse)>=2){ id(lvl_run_rpol)=-id(lvl_run_rpol); id(lvl_rworse)=0;
+                              ESP_LOGW("camper","Level: roll polarity flipped (run-local)"); } }
+                          else if(improved){ id(lvl_rworse)=0; }
+                        } else {
+                          if(worsened){ id(lvl_pworse)=id(lvl_pworse)+1;
+                            if(id(lvl_pworse)>=2){ id(lvl_run_ppol)=-id(lvl_run_ppol); id(lvl_pworse)=0;
+                              ESP_LOGW("camper","Level: pitch polarity flipped (run-local)"); } }
+                          else if(improved){ id(lvl_pworse)=0; }
+                        }
+                      }
+            - lambda: |-
+                float thr=id(level_threshold).state; if(isnan(thr)) thr=0.3f; if(thr<0.05f) thr=0.05f;
+                float r=id(fused_roll)-id(roll_offset);  if(id(imu_invert_roll).state)  r=-r;
+                float p=id(fused_pitch)-id(pitch_offset); if(id(imu_invert_pitch).state) p=-p;
+                bool level=!isnan(r)&&!isnan(p)&&fabsf(r)<=thr&&fabsf(p)<=thr;
+                if(level){
+                  id(preset_status).publish_state("Leveled");
+                  id(level_rpol)=id(lvl_run_rpol);
+                  id(level_ppol)=id(lvl_run_ppol);
+                } else if(id(leveling_active)){
+                  id(preset_status).publish_state("Level - stopped before level");
+                }
+                id(leveling_active)=false; id(preset_applying)=false;
+  - id: full_dump
+    mode: restart
+    then:
+      - text_sensor.template.publish:
+          id: preset_status
+          state: "Full dump - airing out"
+      - lambda: 'id(preset_iter)=0;'
+      - while:
+          condition:
+            lambda: |-
+              if (id(preset_iter) >= 45) return false;
+              if (!id(camper_manifold_connected).state) return false;
+              float fl=id(camper_suspension_front_left_psi).state, fr=id(camper_suspension_front_right_psi).state;
+              float rl=id(camper_suspension_rear_left_psi).state, rr=id(camper_suspension_rear_right_psi).state;
+              return (!isnan(fl)&&fl>3)||(!isnan(fr)&&fr>3)||(!isnan(rl)&&rl>3)||(!isnan(rr)&&rr>3);
+          then:
+            - lambda: 'id(preset_iter)++;'
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x29, 0x2B]
+            - delay: 500ms
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x26, 0x28]
+            - delay: 500ms
+            - ble_client.ble_write:
+                id: camper_manifold
+                service_uuid: ${svc_uuid}
+                characteristic_uuid: ${write_uuid}
+                value: [0x01, 0x01, 0x00, 0x02]
+            - delay: 300ms
+            - script.execute: status_request
+            - delay: 400ms
+      - ble_client.ble_write:
+          id: camper_manifold
+          service_uuid: ${svc_uuid}
+          characteristic_uuid: ${write_uuid}
+          value: [0x01, 0x01, 0x00, 0x02]
+      - text_sensor.template.publish:
+          id: preset_status
+          state: "Dump complete"
+
+# ============================================================
+# INTERVAL
+# ============================================================
+
+interval:
+  # v5.0.1 - RGB status LED: RED = not connected to HA/WiFi (booted only);
+  # BLUE = HA connected but manifold BLE down/searching; GREEN = HA + manifold
+  # both connected (fully working).
+  - interval: 2s
+    then:
+      - lambda: |-
+          bool ha  = id(ha_connected).state;
+          bool ble = id(camper_manifold_connected).state;
+          auto c = id(status_led).turn_on();
+          c.set_brightness(0.25f);
+          if (!ha)       { c.set_rgb(1.0f, 0.0f, 0.0f); }   // RED  - offline
+          else if (!ble) { c.set_rgb(0.0f, 0.3f, 1.0f); }   // BLUE - HA ok, no manifold
+          else           { c.set_rgb(0.0f, 1.0f, 0.0f); }   // GREEN - all good
+          c.perform();
+
+  # v4.4.2 - IMU fusion (10 Hz). Gyro-gated complementary filter:
+  #   accel gives the true tilt (X = vertical axis). When the gyro shows
+  #   motion (|rate| high) we damp hard so valve/compressor jolts don't
+  #   spike the reading; when still we follow the accel fast (no lag).
+  #   Output = fused_pitch / fused_roll (raw, pre-offset). Swap-aware.
+  - interval: 100ms
+    then:
+      - lambda: |-
+          float ax = id(imu_accel_x).state;
+          float ay = id(imu_accel_y).state;
+          float az = id(imu_accel_z).state;
+          if (isnan(ax) || isnan(ay) || isnan(az)) return;
+          bool sw = id(imu_swap_axes).state;
+          float pc = sw ? ay : az;   // pitch component
+          float rc = sw ? az : ay;   // roll component
+          float ap = atan2f(pc, ax) * 57.2957795f;
+          float ar = atan2f(rc, ax) * 57.2957795f;
+          float gx = id(imu_gyro_x).state;
+          float gy = id(imu_gyro_y).state;
+          float gz = id(imu_gyro_z).state;
+          float gmag = 0.0f;
+          if (!isnan(gx) && !isnan(gy) && !isnan(gz))
+            gmag = sqrtf(gx*gx + gy*gy + gz*gz);
+          id(imu_gmag) = gmag;   // v4.4.5: expose for the leveling start-gate
+          // v4.5.5: ACCEL-jitter detector. The compressor shakes the accel
+          // but barely rotates the trailer, so gmag (gyro) misses it. Measure
+          // how far the raw accel tilt sits from the fused value; a high running
+          // average = vibration -> damp HARD so the symmetric hash averages out
+          // instead of leaking in. Quiet -> light damping (tracks fast, no lag).
+          float dev = id(fused_ready) ? (fabsf(ap - id(fused_pitch)) + fabsf(ar - id(fused_roll))) : 0.0f;
+          id(imu_jitter) = 0.85f * id(imu_jitter) + 0.15f * dev;
+          float a = 0.75f + 0.16f * id(imu_jitter);
+          if (a > 0.97f) a = 0.97f;
+          if (gmag > 2.5f && a < 0.92f) a = 0.92f;   // keep the gross-motion floor
+          if (!id(fused_ready)) {
+            id(fused_pitch) = ap; id(fused_roll) = ar; id(fused_ready) = true;
+          } else {
+            id(fused_pitch) = a * id(fused_pitch) + (1.0f - a) * ap;
+            id(fused_roll)  = a * id(fused_roll)  + (1.0f - a) * ar;
+          }
+
+  # Auto Maintain supervisor: while enabled + a mode selected, re-run the
+  # (axle-first, serialized) preset whenever a corner drifts out of deadband.
+  - interval: 15s
+    then:
+      - if:
+          condition:
+            and:
+              - switch.is_on: preset_auto_maintain
+              # v4.4.4: never maintain while off-road articulation is engaged
+              # (side valves open = shared volume; correcting corners fights it).
+              - switch.is_off: load_sharing_relay
+              # v4.4.5: never maintain while the auto-level routine is running.
+              - lambda: 'return !id(leveling_active);'
+              - binary_sensor.is_on: camper_manifold_connected
+              - lambda: 'return !id(preset_applying);'
+              - lambda: |-
+                  bool psi=id(preset_mode_psi).state;
+                  float db=psi?id(preset_deadband_psi).state:id(preset_psi_deadband).state; if(isnan(db))db=2.0f;
+                  // v4.5.11: targets + feedback follow the Height/PSI mode toggle.
+                  std::string sel = std::string(id(camper_gear_select).current_option());
+                  float ft=NAN, rt=NAN;
+                  if(psi){
+                    if(sel=="Highway Normal Load"){ft=id(preset_hwy_norm_front_psi).state;rt=id(preset_hwy_norm_rear_psi).state;}
+                    else if(sel=="Highway Heavy Load"){ft=id(preset_hwy_heavy_front_psi).state;rt=id(preset_hwy_heavy_rear_psi).state;}
+                    else if(sel=="Off-Road"){ft=id(preset_offroad_front_psi).state;rt=id(preset_offroad_rear_psi).state;}
+                    else if(sel=="Parked"){ft=id(preset_parked_front_psi).state;rt=id(preset_parked_rear_psi).state;}
+                    else if(sel=="Easy Maneuver"){ft=id(preset_easy_front_psi).state;rt=id(preset_easy_rear_psi).state;}
+                  } else {
+                    if(sel=="Highway Normal Load"){ft=id(preset_hwy_norm_front).state;rt=id(preset_hwy_norm_rear).state;}
+                    else if(sel=="Highway Heavy Load"){ft=id(preset_hwy_heavy_front).state;rt=id(preset_hwy_heavy_rear).state;}
+                    else if(sel=="Off-Road"){ft=id(preset_offroad_front).state;rt=id(preset_offroad_rear).state;}
+                    else if(sel=="Parked"){ft=id(preset_parked_front).state;rt=id(preset_parked_rear).state;}
+                    else if(sel=="Easy Maneuver"){ft=id(preset_easy_front).state;rt=id(preset_easy_rear).state;}
+                  }
+                  if(isnan(ft)||isnan(rt)) return false;
+                  float fl=psi?id(camper_suspension_front_left_psi).state:id(camper_height_fl).state;
+                  float fr=psi?id(camper_suspension_front_right_psi).state:id(camper_height_fr).state;
+                  float rl=psi?id(camper_suspension_rear_left_psi).state:id(camper_height_rl).state;
+                  float rr=psi?id(camper_suspension_rear_right_psi).state:id(camper_height_rr).state;
+                  if(isnan(fl)||isnan(fr)||isnan(rl)||isnan(rr)) return false;
+                  return fabsf(fl-ft)>db||fabsf(fr-ft)>db||fabsf(rl-rt)>db||fabsf(rr-rt)>db;
+          then:
+            - script.execute: apply_preset
+  # v4.5.10 - compressor-running latch (see globals). 2s cadence.
+  - interval: 2s
+    then:
+      - lambda: |-
+          float t = id(camper_air_tank_psi).state;
+          if (isnan(t)) return;
+          uint32_t now = millis();
+          if (t < 110.0f) {   // v5.0.3: cut-in raised 100 -> 110 psi (new regulator)
+            if (!id(compressor_on)) { id(compressor_on) = true; id(tank_peak) = t; }
+            if (t > id(tank_peak)) id(tank_peak) = t;
+            id(tank_peak_ms) = now;               // below cut-in = definitely running
+          } else if (id(compressor_on)) {
+            if (t > id(tank_peak) + 0.3f) { id(tank_peak) = t; id(tank_peak_ms) = now; }  // still climbing
+            else if (now - id(tank_peak_ms) > 8000) { id(compressor_on) = false; }         // stalled at top -> off
+          }
+
+  # Live status poll
+  - interval: 5s
+    then:
+      - script.execute: status_request
+
+  # Notify watchdog: clear PSI if no FFF1 frame in 60s
+  - interval: 15s
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          uint32_t since = now - id(last_fff1_notify_ms);
+          if (since > 60000) {
+            const float NA = NAN;
+            id(camper_current_gear).publish_state(NA);
+            id(camper_air_tank_psi).publish_state(NA);
+            id(camper_suspension_front_left_psi).publish_state(NA);
+            id(camper_suspension_front_right_psi).publish_state(NA);
+            id(camper_suspension_rear_left_psi).publish_state(NA);
+            id(camper_suspension_rear_right_psi).publish_state(NA);
+            ESP_LOGW("camper", "No FFF1 notify in %u ms - PSI cleared", (unsigned) since);
+          }
+
+  # Emergency overpressure watchdog: DISABLED (uses the same corner
+  # pulse commands, which are not yet verified on Gen3). Manual only.
+
+  # v3.12.0 SAFETY: PRESET AUTO MAINTAIN disabled (was auto-inflating
+  # corners toward the selected gear target using unverified command
+  # bytes). Re-enable after Gen3 command mapping is confirmed.
+
+# ============================================================
+# SENSORS
+# ============================================================
+
+sensor:
+  # Raw FFF1 notify
+  - platform: ble_client
+    type: characteristic
+    ble_client_id: camper_manifold
+    service_uuid: ${svc_uuid}
+    characteristic_uuid: ${notify_uuid}
+    id: camper_raw_notify
+    name: "Raw Notify"
+    internal: true
+    notify: true
+    lambda: |-
+      // ---- DOWN3 (Gen3) live frame decoder ----
+      // Envelope: [type][len][payload..][checksum].
+      // Type 0x01 = live data (confirmed vs DOWN 2.3 app + capture):
+      //   p0=gear p1=tank p2..5=heights(FL,RL,RR,FR) p6..9=PSI(FL,RL,RR,FR)
+      ESP_LOGVV("camper_raw", "FFF1 size=%d hex=%s", x.size(), format_hex(x).c_str());
+      id(last_fff1_notify_ms) = millis();
+      size_t i = 0;
+      while (i + 2 <= x.size()) {
+        uint8_t type = x[i];
+        uint8_t len  = x[i + 1];
+        size_t frame_end = i + 2 + (size_t)len;
+        if (frame_end > x.size()) break;
+        const uint8_t *p = &x[i + 2];
+
+        if (type == 0x01 && len >= 10) {
+          // DOWN3 reports pressure in 0.01 MPa units; psi = raw * scale.
+          // FLOOR (truncate) to match the wired remote (roundf read ~1 high).
+          const float K = 1.45038f;  // 0.01 MPa -> psi (145.038 psi/MPa). Fixed physical constant.
+          id(camper_current_gear).publish_state((float)p[0]);
+          id(camper_air_tank_psi).publish_state(floorf((float)p[1] * K));
+          id(camper_suspension_front_left_psi).publish_state(floorf((float)p[6] * K));
+          id(camper_suspension_rear_left_psi).publish_state(floorf((float)p[7] * K));
+          id(camper_suspension_rear_right_psi).publish_state(floorf((float)p[8] * K));
+          id(camper_suspension_front_right_psi).publish_state(floorf((float)p[9] * K));
+          // height-gauge readings (100 until sensors installed)
+          id(camper_height_fl).publish_state((float)p[2]);
+          id(camper_height_rl).publish_state((float)p[3]);
+          id(camper_height_rr).publish_state((float)p[4]);
+          id(camper_height_fr).publish_state((float)p[5]);
+        }
+        i = frame_end + 1;
+      }
+      return {};
+
+  # ---- Live manifold ----
+  - platform: template
+    name: "Current Gear"
+    id: camper_current_gear
+    accuracy_decimals: 0
+    icon: mdi:car-cog
+
+  - platform: template
+    name: "Air Tank"
+    id: camper_air_tank_psi
+    unit_of_measurement: "psi"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:gauge
+
+  - platform: template
+    name: "Front Left"
+    id: camper_suspension_front_left_psi
+    unit_of_measurement: "psi"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:gauge
+
+  - platform: template
+    name: "Front Right"
+    id: camper_suspension_front_right_psi
+    unit_of_measurement: "psi"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:gauge
+
+  - platform: template
+    name: "Rear Left"
+    id: camper_suspension_rear_left_psi
+    unit_of_measurement: "psi"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:gauge
+
+  - platform: template
+    name: "Rear Right"
+    id: camper_suspension_rear_right_psi
+    unit_of_measurement: "psi"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:gauge
+
+  # ---- Height-gauge readings (100 until sensors installed) ----
+  - platform: template
+    name: "Height FL"
+    id: camper_height_fl
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:arrow-expand-vertical
+  - platform: template
+    name: "Height RL"
+    id: camper_height_rl
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:arrow-expand-vertical
+  - platform: template
+    name: "Height RR"
+    id: camper_height_rr
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:arrow-expand-vertical
+  - platform: template
+    name: "Height FR"
+    id: camper_height_fr
+    unit_of_measurement: "%"
+    state_class: measurement
+    accuracy_decimals: 0
+    icon: mdi:arrow-expand-vertical
+  - platform: template
+    name: "Gen3 Ch 02"
+    id: gen3_ch_02
+    accuracy_decimals: 0
+    entity_category: diagnostic
+  - platform: template
+    name: "Gen3 Ch 05"
+    id: gen3_ch_05
+    accuracy_decimals: 0
+    entity_category: diagnostic
+  - platform: template
+    name: "Gen3 Ch 06"
+    id: gen3_ch_06
+    accuracy_decimals: 0
+    entity_category: diagnostic
+  - platform: template
+    name: "Gen3 Ch 08"
+    id: gen3_ch_08
+    accuracy_decimals: 0
+    entity_category: diagnostic
+  - platform: template
+    name: "Gen3 Ch 09"
+    id: gen3_ch_09
+    accuracy_decimals: 0
+    entity_category: diagnostic
+  - platform: template
+    name: "Gen3 Ch 0E"
+    id: gen3_ch_0e
+    accuracy_decimals: 0
+    entity_category: diagnostic
+
+  # ---- Diagnostic ----
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 30s
+    entity_category: diagnostic
+
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 30s
+    entity_category: diagnostic
+
+  # ---- IMU (BMI160) ----
+  # v4.4.2: accel + gyro read at 10 Hz and are INTERNAL (no HA entities).
+  # Only Pitch and Roll are exposed. The fused value is computed by the
+  # 100ms "IMU fusion" interval (gyro-gated complementary filter).
+  - platform: bmi160
+    i2c_id: bus_a
+    address: 0x69
+    update_interval: 100ms
+    acceleration_x:
+      id: imu_accel_x
+      internal: true
+    acceleration_y:
+      id: imu_accel_y
+      internal: true
+    acceleration_z:
+      id: imu_accel_z
+      internal: true
+    gyroscope_x:
+      id: imu_gyro_x
+      internal: true
+    gyroscope_y:
+      id: imu_gyro_y
+      internal: true
+    gyroscope_z:
+      id: imu_gyro_z
+      internal: true
+
+  # Pitch (nose up/down). Reads the gyro-fused value (no accel spikes,
+  # no averaging lag). Offset + invert applied here.
+  - platform: template
+    name: "Pitch"
+    id: imu_pitch
+    unit_of_measurement: "°"
+    accuracy_decimals: 1
+    icon: mdi:angle-acute
+    update_interval: 200ms
+    lambda: |-
+      float f = id(fused_pitch);
+      if (isnan(f) || !id(fused_ready)) return NAN;
+      float cal = f - id(pitch_offset);
+      if (id(imu_invert_pitch).state) cal = -cal;
+      return cal;
+    filters:
+      - delta: 0.15
+
+  # ---------------------------------------------------------------
+  # v5.0.4 - SUSPENSION ROLL / ROAD CROSS-SLOPE / CHASSIS TWIST
+  #
+  # The IMU measures attitude vs GRAVITY, which is the SUM of two things:
+  #     IMU roll = road cross-slope + suspension articulation
+  # The corner height rulers can measure the suspension half on its own, so
+  # subtracting gives the road. Evidence for why this matters: a 450 km tow
+  # showed IMU peaks of +15.4/-13.5 deg, but a physical test proved the
+  # suspension can only produce ~4 deg - the rest was terrain.
+  #
+  # Heights are PERCENT, so each corner is converted to cm with its own
+  # tape-measured line (2026-07-18, R^2 >= 0.998) BEFORE differencing:
+  #     FL 0.1382*% + 14.32     FR 0.1369*% + 14.36
+  #     RL 0.1536*% + 14.41     RR 0.1465*% + 14.23
+  # Sign: POSITIVE = left side higher (matches the validated IMU convention,
+  # where left-low reads negative).
+  # 100 is the firmware's "no height sensor" sentinel -> any corner >= 99.5
+  # invalidates the whole calculation rather than reporting a confident lie.
+  # ---------------------------------------------------------------
+  - platform: template
+    name: "Suspension Roll"
+    id: suspension_roll
+    unit_of_measurement: "°"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:car-cruise-control
+    update_interval: 1s
+    lambda: |-
+      float fl=id(camper_height_fl).state, fr=id(camper_height_fr).state;
+      float rl=id(camper_height_rl).state, rr=id(camper_height_rr).state;
+      if (isnan(fl)||isnan(fr)||isnan(rl)||isnan(rr)) return NAN;
+      if (fl>=99.5f||fr>=99.5f||rl>=99.5f||rr>=99.5f) return NAN;   // sentinel
+      float cfl=0.1382f*fl+14.32f, cfr=0.1369f*fr+14.36f;
+      float crl=0.1536f*rl+14.41f, crr=0.1465f*rr+14.23f;
+      float L=(cfl+crl)*0.5f, R=(cfr+crr)*0.5f;
+      float tw=id(track_width_m).state; if (isnan(tw)||tw<0.5f) tw=2.0f;
+      return atan2f((L-R)/100.0f, tw) * 180.0f / M_PI;
+
+  - platform: template
+    name: "Road Cross-Slope"
+    id: road_cross_slope
+    unit_of_measurement: "°"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:slope-uphill
+    update_interval: 1s
+    lambda: |-
+      float i=id(imu_roll).state, s=id(suspension_roll).state;
+      if (isnan(i)||isnan(s)) return NAN;
+      return i - s;
+    filters:
+      - delta: 0.15
+
+  # Per-axle roll + the difference between them = chassis twist (diagonal
+  # loading / frame flex), which a whole-vehicle average hides.
+  - platform: template
+    name: "Suspension Roll Front"
+    id: suspension_roll_front
+    unit_of_measurement: "°"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:arrow-left-right
+    entity_category: diagnostic
+    update_interval: 1s
+    lambda: |-
+      float fl=id(camper_height_fl).state, fr=id(camper_height_fr).state;
+      if (isnan(fl)||isnan(fr)||fl>=99.5f||fr>=99.5f) return NAN;
+      float tw=id(track_width_m).state; if (isnan(tw)||tw<0.5f) tw=2.0f;
+      return atan2f(((0.1382f*fl+14.32f)-(0.1369f*fr+14.36f))/100.0f, tw) * 180.0f / M_PI;
+
+  - platform: template
+    name: "Suspension Roll Rear"
+    id: suspension_roll_rear
+    unit_of_measurement: "°"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:arrow-left-right
+    entity_category: diagnostic
+    update_interval: 1s
+    lambda: |-
+      float rl=id(camper_height_rl).state, rr=id(camper_height_rr).state;
+      if (isnan(rl)||isnan(rr)||rl>=99.5f||rr>=99.5f) return NAN;
+      float tw=id(track_width_m).state; if (isnan(tw)||tw<0.5f) tw=2.0f;
+      return atan2f(((0.1536f*rl+14.41f)-(0.1465f*rr+14.23f))/100.0f, tw) * 180.0f / M_PI;
+
+  - platform: template
+    name: "Chassis Twist"
+    id: chassis_twist
+    unit_of_measurement: "°"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:screw-round-top
+    update_interval: 1s
+    lambda: |-
+      float f=id(suspension_roll_front).state, r=id(suspension_roll_rear).state;
+      if (isnan(f)||isnan(r)) return NAN;
+      return f - r;
+    filters:
+      - delta: 0.15
+
+  # Geometric limit of what the suspension can correct, DERIVED (not a magic
+  # number): full left-up / right-down differential is 14.66 cm from the
+  # per-corner calibration, so authority = atan(0.1466 / track).
+  - platform: template
+    name: "Max Roll Authority"
+    id: max_roll_authority
+    unit_of_measurement: "°"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:arrow-expand-vertical
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      float tw=id(track_width_m).state; if (isnan(tw)||tw<0.5f) tw=2.0f;
+      return atan2f(0.1466f, tw) * 180.0f / M_PI;
+
+  # v5.0.5 - PITCH equivalents. Same idea as roll, but front axle vs rear
+  # axle over the AXLE SPACING. Sign: POSITIVE = nose up (matches the
+  # validated IMU convention where nose-down reads negative).
+  - platform: template
+    name: "Suspension Pitch"
+    id: suspension_pitch
+    unit_of_measurement: "°"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:angle-acute
+    update_interval: 1s
+    lambda: |-
+      float fl=id(camper_height_fl).state, fr=id(camper_height_fr).state;
+      float rl=id(camper_height_rl).state, rr=id(camper_height_rr).state;
+      if (isnan(fl)||isnan(fr)||isnan(rl)||isnan(rr)) return NAN;
+      if (fl>=99.5f||fr>=99.5f||rl>=99.5f||rr>=99.5f) return NAN;
+      float F=((0.1382f*fl+14.32f)+(0.1369f*fr+14.36f))*0.5f;
+      float R=((0.1536f*rl+14.41f)+(0.1465f*rr+14.23f))*0.5f;
+      float wb=id(wheelbase_m).state; if (isnan(wb)||wb<0.3f) wb=1.0f;
+      return atan2f((F-R)/100.0f, wb) * 180.0f / M_PI;
+
+  - platform: template
+    name: "Road Pitch-Slope"
+    id: road_pitch_slope
+    unit_of_measurement: "°"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:slope-uphill
+    update_interval: 1s
+    lambda: |-
+      float i=id(imu_pitch).state, s=id(suspension_pitch).state;
+      if (isnan(i)||isnan(s)) return NAN;
+      return i - s;
+    filters:
+      - delta: 0.15
+
+  - platform: template
+    name: "Max Pitch Authority"
+    id: max_pitch_authority
+    unit_of_measurement: "°"
+    state_class: measurement
+    accuracy_decimals: 1
+    icon: mdi:arrow-expand-vertical
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: |-
+      float wb=id(wheelbase_m).state; if (isnan(wb)||wb<0.3f) wb=1.0f;
+      return atan2f(0.1466f, wb) * 180.0f / M_PI;
+
+  # Roll (side-to-side). Reads the gyro-fused value.
+  - platform: template
+    name: "Roll"
+    id: imu_roll
+    unit_of_measurement: "°"
+    accuracy_decimals: 1
+    icon: mdi:angle-acute
+    update_interval: 200ms
+    lambda: |-
+      float f = id(fused_roll);
+      if (isnan(f) || !id(fused_ready)) return NAN;
+      float cal = f - id(roll_offset);
+      if (id(imu_invert_roll).state) cal = -cal;
+      return cal;
+    filters:
+      - delta: 0.15
+
+  # v4.5.5 - live accel-vibration level, so we can watch/tune the compressor
+  # shake threshold. Near 0 = calm; rises while the compressor runs.
+  - platform: template
+    name: "IMU Jitter"
+    id: imu_jitter_sensor
+    unit_of_measurement: "°"
+    accuracy_decimals: 2
+    icon: mdi:vibrate
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return id(imu_jitter);'
+    filters:
+      - delta: 0.05
+
+# ============================================================
+# NUMBERS - tunable parameters
+# ============================================================
+
+number:
+  - platform: template
+    name: "Corner Nudge ms"
+    id: nudge_ms
+    icon: mdi:timer-outline
+    unit_of_measurement: "ms"
+    min_value: 150
+    max_value: 3000
+    step: 50
+    initial_value: 300
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Level Threshold"
+    id: level_threshold
+    icon: mdi:angle-acute
+    unit_of_measurement: "°"
+    min_value: 0.0
+    max_value: 0.5
+    step: 0.05
+    initial_value: 0.3
+    restore_value: true
+    optimistic: true
+    mode: slider
+    entity_category: config
+
+  - platform: template
+    name: "Max Corner PSI"
+    id: max_corner_psi
+    icon: mdi:gauge-full
+    unit_of_measurement: "psi"
+    min_value: 30
+    max_value: 90
+    step: 1
+    initial_value: 75
+    restore_value: true
+    optimistic: true
+    mode: slider
+    entity_category: config
+
+  - platform: template
+    name: "Min Corner PSI"
+    id: min_corner_psi
+    icon: mdi:gauge-empty
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 40
+    step: 1
+    initial_value: 20
+    restore_value: true
+    optimistic: true
+    mode: slider
+    entity_category: config
+
+  - platform: template
+    name: "Emergency Cap PSI"
+    id: emergency_cap_psi
+    icon: mdi:alert-octagon
+    unit_of_measurement: "psi"
+    min_value: 30
+    max_value: 100
+    step: 1
+    initial_value: 95
+    restore_value: true
+    optimistic: true
+    mode: slider
+    entity_category: config
+
+  # v5.0.4 - geometry for the derived roll sensors. Track = distance between
+  # the WHEELS (2.0 m on this trailer; the body is 1.8 m but the suspension
+  # geometry is at the wheels). Tunable: articulate to full lock and adjust
+  # until "Suspension Roll" reads the measured max (~4.0 deg).
+  - platform: template
+    name: "Track Width"
+    id: track_width_m
+    icon: mdi:arrow-left-right
+    unit_of_measurement: "m"
+    min_value: 1.0
+    max_value: 3.0
+    step: 0.01
+    initial_value: 2.0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  # v5.0.5 - front-to-rear AXLE SPACING, used for the pitch equivalent.
+  # NOTE: this is much shorter than the track (tandem axles sit close
+  # together), so the same bag travel produces a MUCH bigger angle in pitch
+  # than in roll. MEASURE between the two axle centres and set it here.
+  - platform: template
+    name: "Axle Spacing"
+    id: wheelbase_m
+    icon: mdi:arrow-up-down
+    unit_of_measurement: "m"
+    min_value: 0.5
+    max_value: 4.0
+    step: 0.01
+    initial_value: 1.0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  # v2.0.0 - preset accuracy (requested: 1 psi)
+  - platform: template
+    name: "Preset Height Deadband"
+    id: preset_psi_deadband
+    icon: mdi:vector-difference
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 8
+    step: 1
+    initial_value: 2
+    restore_value: true
+    optimistic: true
+    mode: slider
+    entity_category: config
+
+  # v4.5.11 - PSI target set (used when Preset Mode PSI is ON) + PSI deadband.
+  - platform: template
+    name: "Parked Front PSI"
+    id: preset_parked_front_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 25
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Parked Rear PSI"
+    id: preset_parked_rear_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 25
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Highway Normal Front PSI"
+    id: preset_hwy_norm_front_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 40
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Highway Normal Rear PSI"
+    id: preset_hwy_norm_rear_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 40
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Highway Heavy Front PSI"
+    id: preset_hwy_heavy_front_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 45
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Highway Heavy Rear PSI"
+    id: preset_hwy_heavy_rear_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 45
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Off-Road Front PSI"
+    id: preset_offroad_front_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 55
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Off-Road Rear PSI"
+    id: preset_offroad_rear_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 55
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Easy Maneuver Front PSI"
+    id: preset_easy_front_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 55
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Easy Maneuver Rear PSI"
+    id: preset_easy_rear_psi
+    icon: mdi:gauge
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 90
+    step: 1
+    initial_value: 20
+    optimistic: true
+    restore_value: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: "Preset PSI Deadband"
+    id: preset_deadband_psi
+    icon: mdi:vector-difference
+    unit_of_measurement: "psi"
+    min_value: 0
+    max_value: 10
+    step: 1
+    initial_value: 3
+    optimistic: true
+    restore_value: true
+    mode: slider
+    entity_category: config
+
+  # ============================================================
+  # v2.0.0 PRESET TARGET PRESSURES - 5 modes x Front/Rear
+  # Flash-persisted, editable from HA or the ESP web UI.
+  # Reference: 20 psi = on bumpstops, ~42 = ride height, 70 = max.
+  # NOTE: for Off-Road keep Front = Rear (load sharing links
+  # front<->rear per side when the bypass valve is open).
+  # ============================================================
+
+  - platform: template
+    name: "Highway Normal Front Height"
+    id: preset_hwy_norm_front
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 45
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Highway Normal Rear Height"
+    id: preset_hwy_norm_rear
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 45
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Highway Heavy Front Height"
+    id: preset_hwy_heavy_front
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 50
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Highway Heavy Rear Height"
+    id: preset_hwy_heavy_rear
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 50
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Off-Road Front Height"
+    id: preset_offroad_front
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 75
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Off-Road Rear Height"
+    id: preset_offroad_rear
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 75
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Parked Front Height"
+    id: preset_parked_front
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 20
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Parked Rear Height"
+    id: preset_parked_rear
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 20
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Easy Maneuver Front Height"
+    id: preset_easy_front
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 30
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Easy Maneuver Rear Height"
+    id: preset_easy_rear
+    icon: mdi:gauge
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 100
+    step: 1
+    initial_value: 30
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+# ============================================================
+# BINARY SENSORS
+# ============================================================
+
+binary_sensor:
+  # v5.0.1 - true while connected to Home Assistant (API). Drives the status LED.
+  - platform: status
+    name: "HA Connected"
+    id: ha_connected
+    internal: true
+  - platform: template
+    name: "Manifold Connected"
+    id: camper_manifold_connected
+    device_class: connectivity
+    entity_category: diagnostic
+
+  # v4.4.10 - true for ~2s right after Off-Road articulation engages, so the
+  # dashboard button can flash while turning on, then sit solid amber.
+  - platform: template
+    name: "Articulation Settling"
+    id: camper_artic_settling
+    entity_category: diagnostic
+
+  # v4.5.2 - Gen3 frame uses 100 as the "no sensor" sentinel. A ruler pinned
+  # at ~100% while its corner PSI is mid-range (25..65) for 30s is a fault
+  # (unplugged/failed), NOT strapped-out. Warn; the height loops also treat a
+  # >=99.5% reading as "satisfied" so a dead ruler cannot dump a real corner.
+  - platform: template
+    name: "Height Sensor Suspect"
+    id: height_sensor_suspect
+    device_class: problem
+    icon: mdi:ruler-square-compass
+    on_press:
+      # v4.5.11: a suspect ruler latches presets/maintain to PSI (manual restore).
+      - if:
+          condition:
+            switch.is_off: preset_mode_psi
+          then:
+            - switch.turn_on: preset_mode_psi
+            - logger.log: "CAMPER: Height sensor suspect -> Preset Mode latched to PSI"
+    lambda: |-
+      auto susp = [](float h, float pr) -> bool {
+        return !isnan(h) && !isnan(pr) && h >= 99.5f && pr > 25.0f && pr < 65.0f;
+      };
+      return susp(id(camper_height_fl).state, id(camper_suspension_front_left_psi).state)
+          || susp(id(camper_height_fr).state, id(camper_suspension_front_right_psi).state)
+          || susp(id(camper_height_rl).state, id(camper_suspension_rear_left_psi).state)
+          || susp(id(camper_height_rr).state, id(camper_suspension_rear_right_psi).state);
+    filters:
+      - delayed_on: 30s
+      - delayed_off: 5s
+
+  # v4.5.10 - true the whole time the compressor is running (latch above); the
+  # dashboard blinks the tank digits on THIS, so it signals the full pump-up.
+  - platform: template
+    name: "Compressor Running"
+    id: compressor_running
+    device_class: running
+    icon: mdi:engine
+    lambda: 'return id(compressor_on);'
+
+  - platform: template
+    name: "Air Bag Overpressure"
+    id: air_bag_overpressure
+    device_class: problem
+    icon: mdi:alert-octagon
+    lambda: |-
+      float cap = id(emergency_cap_psi).state;
+      if (isnan(cap)) return {};
+      float fl = id(camper_suspension_front_left_psi).state;
+      float fr = id(camper_suspension_front_right_psi).state;
+      float rl = id(camper_suspension_rear_left_psi).state;
+      float rr = id(camper_suspension_rear_right_psi).state;
+      bool any = (!isnan(fl) && fl >= cap) ||
+                 (!isnan(fr) && fr >= cap) ||
+                 (!isnan(rl) && rl >= cap) ||
+                 (!isnan(rr) && rr >= cap);
+      return any;
+    # v4.4.11: only warn on a SUSTAINED condition - ignores the brief PSI
+    # spike the manifold reports while a valve actuates (raise/lower).
+    filters:
+      - delayed_on: 4s
+      - delayed_off: 2s
+
+  - platform: template
+    name: "Air Bag Underpressure"
+    id: air_bag_underpressure
+    device_class: problem
+    icon: mdi:alert-circle-outline
+    lambda: |-
+      float flr = id(min_corner_psi).state;
+      if (isnan(flr)) return {};
+      float fl = id(camper_suspension_front_left_psi).state;
+      float fr = id(camper_suspension_front_right_psi).state;
+      float rl = id(camper_suspension_rear_left_psi).state;
+      float rr = id(camper_suspension_rear_right_psi).state;
+      bool any = (!isnan(fl) && fl <= flr) ||
+                 (!isnan(fr) && fr <= flr) ||
+                 (!isnan(rl) && rl <= flr) ||
+                 (!isnan(rr) && rr <= flr);
+      return any;
+    filters:
+      - delayed_on: 4s
+      - delayed_off: 2s
+
+  # ---- PHYSICAL CONTROL BUTTONS ----
+  - platform: gpio
+    name: "Manifold Button"
+    id: compressor_button
+    icon: mdi:gesture-tap-button
+    entity_category: diagnostic
+    pin:
+      number: GPIO15
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      - logger.log: "CAMPER: Manifold button pressed - toggling relay"
+      - switch.toggle: compressor_relay
+
+  - platform: gpio
+    name: "Load Share Button"
+    id: load_share_button
+    icon: mdi:gesture-tap-button
+    entity_category: diagnostic
+    pin:
+      number: GPIO14
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+    on_press:
+      - logger.log: "CAMPER: Load Share button pressed - toggling relay"
+      - switch.toggle: load_sharing_relay
+
+# ============================================================
+# TEXT SENSORS
+# ============================================================
+
+text_sensor:
+  - platform: template
+    name: "Config Version"
+    id: config_version_sensor
+    icon: mdi:tag-text
+    entity_category: diagnostic
+    update_interval: 3600s
+    lambda: |-
+      return std::string("${config_version} (${config_date})");
+
+  - platform: wifi_info
+    ip_address:
+      name: "IP Address"
+      entity_category: diagnostic
+    ssid:
+      name: "SSID"
+      entity_category: diagnostic
+
+  - platform: template
+    name: "Pitch Direction"
+    id: pitch_direction
+    icon: mdi:axis-z-rotate-clockwise
+    update_interval: 1s
+    lambda: |-
+      float pitch = id(imu_pitch).state;
+      if (isnan(pitch)) return {"Unknown"};
+      float thresh = id(level_threshold).state;
+      if (isnan(thresh)) thresh = 0.5f;
+      if (pitch >  thresh)  return {"Nose Up"};
+      if (pitch < -thresh)  return {"Nose Down"};
+      return {"Level"};
+
+  - platform: template
+    name: "Roll Direction"
+    id: roll_direction
+    icon: mdi:axis-x-rotate-clockwise
+    update_interval: 1s
+    lambda: |-
+      float roll = id(imu_roll).state;
+      if (isnan(roll)) return {"Unknown"};
+      float thresh = id(level_threshold).state;
+      if (isnan(thresh)) thresh = 0.5f;
+      if (roll >  thresh)  return {"Right Side Down"};
+      if (roll < -thresh)  return {"Left Side Down"};
+      return {"Level"};
+
+  # v2.0.0 - preset state machine for the dashboard
+  # Idle / Applying X / Reached X / Maintaining X / Aborted - reason
+  - platform: template
+    name: "Preset Status"
+    id: preset_status
+    icon: mdi:state-machine
+
+  - platform: template
+    name: "Front Jack Advice"
+    id: front_jack_advice
+    icon: mdi:tools
+    update_interval: 2s
+    lambda: |-
+      float pitch  = id(imu_pitch).state;
+      float thresh = id(level_threshold).state;
+      if (isnan(pitch) || isnan(thresh)) return {"Unknown"};
+      if (fabsf(pitch) <= thresh) return {"Not needed"};
+
+      float fl = id(camper_suspension_front_left_psi).state;
+      float fr = id(camper_suspension_front_right_psi).state;
+      float rl = id(camper_suspension_rear_left_psi).state;
+      float rr = id(camper_suspension_rear_right_psi).state;
+      float min_psi = id(min_corner_psi).state;
+      float max_psi = id(max_corner_psi).state;
+      if (isnan(min_psi) || isnan(max_psi)) return {"Unknown"};
+
+      if (pitch > thresh) {
+        bool can_lower_front = (!isnan(fl) && fl > min_psi) ||
+                               (!isnan(fr) && fr > min_psi);
+        bool can_raise_rear  = (!isnan(rl) && rl < max_psi) ||
+                               (!isnan(rr) && rr < max_psi);
+        if (!can_lower_front && !can_raise_rear) return {"Lower front jack"};
+        return {"Air bags handling"};
+      } else {
+        bool can_raise_front = (!isnan(fl) && fl < max_psi) ||
+                               (!isnan(fr) && fr < max_psi);
+        bool can_lower_rear  = (!isnan(rl) && rl > min_psi) ||
+                               (!isnan(rr) && rr > min_psi);
+        if (!can_raise_front && !can_lower_rear) return {"Raise front jack"};
+        return {"Air bags handling"};
+      }
+
+# ============================================================
+# SWITCHES
+# ============================================================
+
+switch:
+  # Load Sharing relay
+  # ON  = bypass valves open  -> FL<->RL and FR<->RR pneumatically linked
+  # OFF = corners isolated
+  - platform: gpio
+    name: "Load Sharing (Off-Road Articulation)"
+    id: load_sharing_relay
+    icon: mdi:rotate-3d-variant
+    pin:
+      number: GPIO17
+      mode: OUTPUT
+      inverted: true
+    restore_mode: ALWAYS_OFF
+    # v4.4.4 INTERLOCK: off-road articulation and auto-maintain are mutually
+    # exclusive, sequenced so maintain never runs against open valves.
+    on_turn_on:
+      # Entering off-road: abort any auto-level, kill auto-maintain FIRST (the
+      # supervisor is also hard-gated off), then the bypass valves are open.
+      - lambda: 'id(leveling_active) = false;'
+      - script.stop: auto_level
+      - binary_sensor.template.publish:
+          id: camper_artic_settling
+          state: ON
+      - switch.turn_off: preset_auto_maintain
+      - logger.log: "CAMPER: Off-Road articulation ON -> auto-maintain OFF, side valves open"
+      - delay: 2000ms
+      - binary_sensor.template.publish:
+          id: camper_artic_settling
+          state: OFF
+    on_turn_off:
+      # Leaving off-road: valves are closing; let the shared volume settle,
+      # THEN re-enable auto-maintain. Gated on manifold connected so a
+      # boot-time restore-OFF can't spuriously turn maintain on.
+      - binary_sensor.template.publish:
+          id: camper_artic_settling
+          state: OFF
+      - logger.log: "CAMPER: Off-Road articulation OFF -> valves closed, settling 1.5s"
+      - delay: 1500ms
+      # v5.0.3: Auto-Maintain is now MANUAL-ONLY - it is never switched on by
+      # code. Leaving off-road no longer re-enables it; the user turns it on.
+      - logger.log: "CAMPER: Off-road exit - Auto-maintain left OFF (manual only)"
+
+  # v2.0.0 - Air Manifold master relay (was "Compressor").
+  # Powers the whole manifold - when OFF, no suspension control at all.
+  # ALWAYS_ON: manifold is re-energized automatically after every
+  # ESP reboot, so control (and gear state) survives power cycles.
+  - platform: gpio
+    name: "Air Manifold"
+    id: compressor_relay
+    icon: mdi:pipe-valve
+    pin:
+      number: GPIO16
+      mode: OUTPUT
+      inverted: true
+    restore_mode: ALWAYS_ON
+
+  # v4.3.0 - IMU orientation toggles (hidden, config category).
+  # One-time setup: park level, do the 30s tilt test, flip as needed.
+  #   Swap    : if lifting a SIDE moves the Pitch dial (and the tongue
+  #             moves Roll), turn this ON to swap them back.
+  #   Invert  : if the correct dial moves the WRONG way (up = negative),
+  #             turn the matching Invert ON. Invert is display-only, so
+  #             0 stays 0 - no need to recalibrate after flipping it.
+  # After changing SWAP, press Calibrate Level Zero again.
+  - platform: template
+    name: "IMU Swap Roll Pitch"
+    id: imu_swap_axes
+    icon: mdi:swap-horizontal
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "IMU Invert Roll"
+    id: imu_invert_roll
+    icon: mdi:flip-horizontal
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  - platform: template
+    name: "IMU Invert Pitch"
+    id: imu_invert_pitch
+    icon: mdi:flip-vertical
+    entity_category: config
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+
+  # v3.1.0 - Manual BLE link control. OFF = ESP releases the
+  # manifold so the DOWN phone app can connect. ON = ESP owns it.
+  - platform: template
+    name: "Manifold BLE Link"
+    id: manifold_ble_link
+    icon: mdi:bluetooth
+    optimistic: true
+    restore_mode: ALWAYS_ON
+    turn_on_action:
+      - logger.log: "CAMPER: BLE link ON - will connect on next advertisement"
+      - lambda: 'id(last_connect_try_ms) = 0;'
+    turn_off_action:
+      - logger.log: "CAMPER: BLE link OFF - disconnecting from manifold"
+      - ble_client.disconnect: camper_manifold
+
+  # v4.5.11 - Preset control metric. OFF = ruler HEIGHT % (default, sensors
+  # installed). ON = air-bag PSI (limp-home if a ruler fails). Same 10 mode
+  # sliders serve both; the PSI target set is separate so both are remembered.
+  - platform: template
+    name: "Preset Mode PSI"
+    id: preset_mode_psi
+    icon: mdi:gauge-low
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - logger.log: "CAMPER: Preset Mode -> PSI (height-sensor fallback)"
+    turn_off_action:
+      - logger.log: "CAMPER: Preset Mode -> Height %"
+
+  # v2.0.0 - Manual/Auto preset behavior.
+  # OFF (Manual): selecting a mode applies once, drift is ignored.
+  # ON  (Auto):   supervisor re-adjusts whenever pressure drifts
+  #               out of the deadband from the selected mode.
+  - platform: template
+    name: "Preset Auto Maintain"
+    id: preset_auto_maintain
+    icon: mdi:sync
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - logger.log: "CAMPER: Preset Auto Maintain ENABLED"
+    turn_off_action:
+      - logger.log: "CAMPER: Preset Auto Maintain DISABLED"
+
+# ============================================================
+# SELECT - GEAR DROPDOWN (v2.0.0: auto-applies on selection)
+# ============================================================
+
+select:
+  - platform: template
+    name: "Gear"
+    id: camper_gear_select
+    icon: mdi:car-shift-pattern
+    optimistic: true
+    restore_value: true
+    options:
+      - "Highway Normal Load"
+      - "Highway Heavy Load"
+      - "Off-Road"
+      - "Parked"
+      - "Easy Maneuver"
+    on_value:
+      then:
+        - if:
+            condition:
+              and:
+                - binary_sensor.is_on: camper_manifold_connected
+                # v4.4.5: don't apply a gear mid-auto-level (avoids BLE clash).
+                - lambda: 'return !id(leveling_active);'
+            then:
+              # v4.4.8: Off-Road MODE auto-engages articulation; any other
+              # mode disengages it. The load_sharing interlock then flips
+              # auto-maintain (OFF while articulating / ON otherwise). On the
+              # other modes you can still toggle articulation by hand.
+              - if:
+                  condition:
+                    lambda: 'return id(camper_gear_select).current_option() == std::string("Off-Road");'
+                  then:
+                    - switch.turn_on: load_sharing_relay
+                  else:
+                    - switch.turn_off: load_sharing_relay
+              - logger.log:
+                  format: "CAMPER: Gear = %s -> applying (Gen3)"
+                  args: ['x.c_str()']
+              - script.execute: apply_preset
+            else:
+              - text_sensor.template.publish:
+                  id: preset_status
+                  state: "Aborted - Disconnected"
+
+# ============================================================
+# BUTTONS
+# ============================================================
+
+button:
+  # ---------- SYSTEM ----------
+  - platform: restart
+    name: "Reboot ESP32"
+    entity_category: diagnostic
+
+  # v2.0.0 - hard stop for a running preset (v4.4.5: also stops auto-level)
+  - platform: template
+    name: "Stop Preset"
+    icon: mdi:stop-circle-outline
+    on_press:
+      - lambda: 'id(leveling_active) = false;'   # break the level loop first
+      - script.stop: auto_level
+      - script.stop: apply_preset
+      - script.stop: full_dump
+      - lambda: |-
+          id(preset_applying) = false;
+          id(preset_status).publish_state("Stopped by user");
+
+  # v4.4.5 - AUTO LEVELING: one-button parked leveling. Stop via Stop Preset.
+  - platform: template
+    name: "Auto Level"
+    icon: mdi:image-filter-center-focus
+    on_press:
+      - script.execute: auto_level
+
+  - platform: template
+    name: "Full Dump 0 psi"
+    icon: mdi:arrow-collapse-down
+    on_press:
+      - script.execute: full_dump
+
+  # ---------- IMU CALIBRATION ----------
+  - platform: template
+    name: "Calibrate Level Zero"
+    icon: mdi:bullseye-arrow
+    on_press:
+      - lambda: |-
+          // v4.4.2 - capture the current FUSED tilt as the level offset
+          // (fused value already X-vertical + swap-aware, pre-invert).
+          if (!id(fused_ready)) {
+            ESP_LOGW("camper", "Calibrate pressed but IMU not ready - try again");
+            return;
+          }
+          float raw_pitch = id(fused_pitch);
+          float raw_roll  = id(fused_roll);
+          id(pitch_offset) = raw_pitch;
+          id(roll_offset)  = raw_roll;
+          id(imu_pitch).publish_state(0.0f);
+          id(imu_roll).publish_state(0.0f);
+          ESP_LOGI("camper", "IMU calibrated: pitch_offset=%.2f roll_offset=%.2f", raw_pitch, raw_roll);
+
+  - platform: template
+    name: "Reset IMU Calibration"
+    icon: mdi:restore
+    entity_category: config
+    disabled_by_default: true
+    on_press:
+      - lambda: |-
+          id(pitch_offset) = 0.0f;
+          id(roll_offset)  = 0.0f;
+          id(imu_pitch).publish_state(NAN);
+          id(imu_roll).publish_state(NAN);
+          ESP_LOGI("camper", "IMU calibration cleared");
+
+  - platform: template
+    name: "Status Request"
+    entity_category: config
+    disabled_by_default: true
+    on_press:
+      - script.execute: status_request
+
+  # ---------- INDIVIDUAL CORNERS ----------
+  - platform: template
+    name: "Front Left Lower"
+    icon: mdi:arrow-down
+    entity_category: config
+    on_press:
+      - script.execute: pulse_fl_lower
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Front Left Raise"
+    icon: mdi:arrow-up
+    entity_category: config
+    on_press:
+      - script.execute: pulse_fl_raise
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Front Right Lower"
+    icon: mdi:arrow-down
+    entity_category: config
+    on_press:
+      - script.execute: pulse_fr_lower
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Front Right Raise"
+    icon: mdi:arrow-up
+    entity_category: config
+    on_press:
+      - script.execute: pulse_fr_raise
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Rear Left Lower"
+    icon: mdi:arrow-down
+    entity_category: config
+    on_press:
+      - script.execute: pulse_rl_lower
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Rear Left Raise"
+    icon: mdi:arrow-up
+    entity_category: config
+    on_press:
+      - script.execute: pulse_rl_raise
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Rear Right Lower"
+    icon: mdi:arrow-down
+    entity_category: config
+    on_press:
+      - script.execute: pulse_rr_lower
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Rear Right Raise"
+    icon: mdi:arrow-up
+    entity_category: config
+    on_press:
+      - script.execute: pulse_rr_raise
+      - delay: 500ms
+      - script.execute: status_request
+
+  # ---------- AXLES ----------
+  - platform: template
+    name: "Front Axle Lower"
+    icon: mdi:chevron-double-down
+    entity_category: config
+    on_press:
+      - script.execute: pulse_front_axle_lower
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Front Axle Raise"
+    icon: mdi:chevron-double-up
+    entity_category: config
+    on_press:
+      - script.execute: pulse_front_axle_raise
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Rear Axle Lower"
+    icon: mdi:chevron-double-down
+    entity_category: config
+    on_press:
+      - script.execute: pulse_rear_axle_lower
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Rear Axle Raise"
+    icon: mdi:chevron-double-up
+    entity_category: config
+    on_press:
+      - script.execute: pulse_rear_axle_raise
+      - delay: 500ms
+      - script.execute: status_request
+
+  # ---------- SIDES (composite: FL+RL / FR+RR) ----------
+  - platform: template
+    name: "Left Side Lower"
+    icon: mdi:chevron-double-down
+    entity_category: config
+    on_press:
+      - script.execute: pulse_fl_lower
+      - delay: 250ms
+      - script.execute: pulse_rl_lower
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Left Side Raise"
+    icon: mdi:chevron-double-up
+    entity_category: config
+    on_press:
+      - script.execute: pulse_fl_raise
+      - delay: 250ms
+      - script.execute: pulse_rl_raise
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Right Side Lower"
+    icon: mdi:chevron-double-down
+    entity_category: config
+    on_press:
+      - script.execute: pulse_fr_lower
+      - delay: 250ms
+      - script.execute: pulse_rr_lower
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "Right Side Raise"
+    icon: mdi:chevron-double-up
+    entity_category: config
+    on_press:
+      - script.execute: pulse_fr_raise
+      - delay: 250ms
+      - script.execute: pulse_rr_raise
+      - delay: 500ms
+      - script.execute: status_request
+
+  # ---------- ALL FOUR ----------
+  - platform: template
+    name: "All Lower"
+    icon: mdi:arrow-collapse-vertical
+    entity_category: config
+    on_press:
+      - script.execute: pulse_front_axle_lower
+      - delay: 300ms
+      - script.execute: pulse_rear_axle_lower
+      - delay: 500ms
+      - script.execute: status_request
+
+  - platform: template
+    name: "All Raise"
+    icon: mdi:arrow-expand-vertical
+    entity_category: config
+    on_press:
+      - script.execute: pulse_front_axle_raise
+      - delay: 300ms
+      - script.execute: pulse_rear_axle_raise
+      - delay: 500ms
+      - script.execute: status_request
