@@ -4,13 +4,15 @@ Eight tabs, dark theme, built for a 10" wall tablet with a **1340 × 800** usabl
 area. It is meant to be read at a glance, in daylight, by someone standing
 outside the trailer.
 
-> **About the screenshots.** They were produced from the code in this repo, not
-> from the real trailer. The dashboard YAML at `dashboard-v206` was loaded into a
-> clean Home Assistant install, the entities were filled with demo values
-> (`tools/render-screenshots/seed.py`), and each tab was captured headless at
-> 1340 × 800 with 2× pixel density, which gives 2680 px wide images. The camera
-> feeds and the Wi-Fi QR code are placeholders, and the network figures (IP,
-> carrier) are documentation values. To regenerate them, see
+> **About the screenshots.** They are taken from the running trailer on
+> 2026-11-18, in a desktop browser, so the tiles are wider than on the 10"
+> tablet. Private details are blurred: the Wi-Fi QR code, the WAN IP, the
+> repeated Wi-Fi network's name and the four camera images. The amber
+> "CLEAR WATER LOW" strip at the top is real; the clear tank was empty that day.
+>
+> Two images are **demo renders**, marked below: the unlocked suspension
+> settings and the water tab with an alert. They were produced from this repo's
+> code with demo values; to render your own, see
 > [`tools/render-screenshots/README.md`](../tools/render-screenshots/README.md).
 
 ```mermaid
@@ -29,7 +31,7 @@ graph LR
 
 ## 1. Home — the one-glance status board
 
-![Home tab](images/tab-home.png)
+![Home tab](../images/tab-home.png)
 
 **What it shows**
 
@@ -59,7 +61,7 @@ tab.
 
 ## 2. Energy — battery and solar in detail
 
-![Energy tab](images/tab-energy.png)
+![Energy tab](../images/tab-energy.png)
 
 **What it shows**
 
@@ -87,7 +89,7 @@ one source, and the alert strip says **BATTERY ON SHUNT FALLBACK**. See
 
 ## 3. Lighting — every relay, grouped by where it is
 
-![Lighting tab](images/tab-lighting.png)
+![Lighting tab](../images/tab-lighting.png)
 
 | Group | Tiles | Notes |
 |---|---|---|
@@ -117,7 +119,7 @@ physical panel button or from an RF433 fob.
 
 ## 4. Water — tanks, pump and freeze protection
 
-![Water tab](images/tab-water.png)
+![Water tab](../images/tab-water.png)
 
 **What it shows**
 
@@ -134,14 +136,14 @@ trip. The temperature row is there to decide when the heat-cable relay (RE16)
 needs to come on. When the gauges relay is off (00:00–07:00 by the board's own
 schedule), the tank readings go **unavailable**, not 0 %.
 
-![Water tab with an alert active](images/tab-water-alert.png)
+![Water tab with an alert active (demo render)](../images/tab-water-alert.png)
 
-*The same tab with an alert active. The global alert strip appears at the top of
+*Demo render: the same tab with an alert active. The global alert strip appears at the top of
 every tab, and takes zero height when nothing is wrong.*
 
 ## 5. Climate — diesel heater and its virtual fuel tank
 
-![Climate tab](images/tab-climate.png)
+![Climate tab](../images/tab-climate.png)
 
 **What it shows**
 
@@ -164,7 +166,7 @@ for confirmation because it re-baselines the gauge.
 
 ## 6. Suspension — air ride, levelling and settings
 
-![Suspension tab](images/tab-suspension.png)
+![Suspension tab](../images/tab-suspension.png)
 
 **What it shows, top to bottom**
 
@@ -198,9 +200,13 @@ This is the tab used most while travelling, and its history feeds long-term
 statistics: the heights and roll/pitch sensors carry `state_class: measurement`.
 Anything that changes how the trailer behaves on the road is behind the lock.
 
-![Suspension settings unlocked](images/tab-suspension-unlocked.png)
+![Suspension settings and mode presets, locked](../images/tab-suspension-settings.png)
 
-*Unlocked:*
+*Locked: the Suspension Settings and Mode Presets cards below the lock bar.*
+
+![Suspension settings unlocked (demo render)](../images/tab-suspension-unlocked.png)
+
+*Unlocked (demo render):*
 
 - Unlocking needs a tap and a confirmation.
 - The bar shows a **mm:ss countdown** and blinks amber.
@@ -212,7 +218,7 @@ See [04 — Air suspension](04-air-suspension.md) for the levelling algorithm.
 
 ## 7. Cameras — four sides and the interior
 
-![Cameras tab](images/tab-cameras.png)
+![Cameras tab](../images/tab-cameras.png)
 
 **What it shows**
 
@@ -230,7 +236,7 @@ on a tablet; tapping a feed opens its full-resolution stream.
 
 ## 8. Connectivity — which link is carrying traffic
 
-![Connectivity tab](images/tab-connectivity.png)
+![Connectivity tab](../images/tab-connectivity.png)
 
 **What it shows**
 

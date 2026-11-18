@@ -55,7 +55,7 @@ and an IMU.
 ## 5. Home Assistant package
 
 ```bash
-cp homeassistant/packages/*.yaml  <config>/packages/
+cp packages/*.yaml  <config>/packages/
 ```
 
 and in `configuration.yaml`:
@@ -79,7 +79,7 @@ the dashboard renders as error cards.
 ## 7. Theme
 
 ```bash
-cp homeassistant/themes/garmin_dark.yaml  <config>/themes/
+cp themes/garmin_dark.yaml  <config>/themes/
 ```
 
 Restart, then select it in your profile. The dashboard's colours assume it.
@@ -87,7 +87,7 @@ Restart, then select it in your profile. The dashboard's colours assume it.
 ## 8. Dashboard
 
 Create a new dashboard, switch to **raw configuration editor**, and paste
-`homeassistant/dashboards/smart-camper-dashboard.yaml`.
+`dashboard/smart-camper-dashboard.yaml`.
 
 > Home Assistant **strips comments** when you save from the raw editor. Keep the
 > file in the repo as the documented master and edit there, not in the browser,
@@ -120,12 +120,4 @@ exactly which version last worked is worth the bookkeeping.
 
 ## Troubleshooting
 
-| Symptom | Likely cause |
-|---|---|
-| Entity is `unknown`, template looks right | You referenced a `unique_id`, not an `entity_id`. Check Developer Tools. |
-| Tile renders but does nothing | `service:` cannot be templated in button-card. Use a literal service, templated `entity_id`. |
-| Icon missing on a short tile | `size:` is a % of card *width*; `#img-cell` is `overflow: hidden` and can compute to 0 px. See [03](03-integrations.md). |
-| Sensor "no longer provided by the template integration" | A structural YAML error — often a stray `- binary_sensor:` mid-list silently redefining sensors. Parse the file. |
-| Duplicate mapping key on dashboard save | Two `icon:` or `styles:` keys in one card. |
-| BMS entities all unavailable | Check the integration version — 2.14.0 is broken, 2.13.0 works. |
-| Tank reads 0% not unavailable | Missing `availability:` guard, or a `\| float(0)` swallowing the absence. |
+See [15 — Troubleshooting](15-troubleshooting.md).

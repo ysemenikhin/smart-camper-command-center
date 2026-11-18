@@ -1,5 +1,5 @@
 # ============================================================
-# CAMPER DASHBOARD  -  v145   (Home Assistant / Lovelace)
+# CAMPER DASHBOARD  -  v207   (Home Assistant / Lovelace)
 # Expedition trailer control panel - Garmin-style dark theme, 10" tablet.
 #
 # INSTALL
@@ -17,6 +17,8 @@
 #                           Water, Suspension, Cameras)
 #
 # CHANGELOG
+#   v207 - Header title line said v145; it now shows the current version.
+#          Comment-only change, the dashboard itself is identical to v206.
 #   v206 - Energy tab bank cards: a Power row under Current on each bank -
 #          sensor.battery_1_power ("Battery 1 Power") and
 #          sensor.battery_2_power ("Battery 2 Power"). Nothing else changed.

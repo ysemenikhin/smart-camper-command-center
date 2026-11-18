@@ -3,6 +3,11 @@
 Sixteen relays, sixteen physical inputs, four analogue inputs, RF433, an RTC and
 Ethernet, on one DIN-mountable ESP32 board.
 
+The fuses, cables and button wiring for every relay are in
+[Wiring](../hardware/wiring.md). Drawing v10 still shows RE13, RE15 and RE16 as
+spare; the [differences](../hardware/wiring.md#where-the-drawing-and-the-firmware-differ)
+are listed there.
+
 ## Relay map
 
 **All sixteen are allocated. None are spare.**

@@ -1,0 +1,40 @@
+name: Feature request
+description: Suggest an improvement or a new capability.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      description: Describe the situation on the road or at camp, not just the feature.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+    validations:
+      required: true
+  - type: dropdown
+    id: where
+    attributes:
+      label: Where it would live
+      description: Anything that must keep working with Home Assistant down belongs in firmware.
+      options:
+        - Firmware (ESPHome)
+        - Home Assistant package
+        - Dashboard
+        - Router scripts
+        - Docs or hardware
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety impact
+      description: Could this switch a load or move the suspension? What happens if Home Assistant or the network is down?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
