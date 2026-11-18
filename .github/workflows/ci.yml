@@ -1,0 +1,20 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: gitleaks/gitleaks-action@v2
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install yamllint
+      - run: yamllint -c .yamllint.yml esphome homeassistant
+      - name: placeholder check
+        run: |
+          if git grep -nIE '([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}|\b192\.168\.[0-9]+\.[0-9]+\b|key: "[A-Za-z0-9+/]{40,}={0,2}"' -- ':!*.md' ':!esphome/secrets.yaml.example' | grep -v 'XX:XX:XX:XX:XX:XX'; then
+            echo "Real-looking identifier found - replace it with !secret or a placeholder"; exit 1; fi

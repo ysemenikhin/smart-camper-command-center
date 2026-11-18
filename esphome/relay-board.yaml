@@ -1,0 +1,1423 @@
+# ============================================================
+# CAMPER RELAY BOARD  -  KinCony KC868-A16S   (v2.3.8)
+#
+# v2.3.8  STATUS ENTITIES (all diagnostic except the Restart button):
+#           * Config Version   "2.3.8 (2026-10-20)", from the substitutions
+#                              block - same pattern as the air-suspension ESP.
+#                              Bump config_version/config_date with every
+#                              new version of this file.
+#           * ESPHome Version  ESPHome release + build date of the firmware.
+#           * IP Address       Ethernet IP (ethernet_info).
+#           * Uptime           seconds since boot, updated every 15 min
+#                              (96 rows/day) so it adds no recorder churn.
+#           * Status           ON while the board is connected to HA.
+#           * Restart          button that reboots the board. A reboot cuts
+#                              the Stabilisers relay (RE15 is ALWAYS_OFF and
+#                              DI15 is locked out for 10 s) - by design.
+#         Nothing else changed.
+# v2.3.7  RF433 SLOTS 4 -> 6. Added RF Slot 5/6 Code, Learn Slot 5/6 and
+#         RF Slot 5/6 Received, and included slots 5/6 in the on_rc_switch
+#         gate and in rf_check_slots. Same behaviour as slots 1-4 (200 ms
+#         window, other slots released on a different learned code). Slots
+#         1-4 keep their entity ids and stored codes. Nothing else changed.
+# v2.3.6  RF433 PRESS HANDLING - rf_check_slots and the on_rc_switch gate
+#         that starts it; nothing else changed.
+#         Measured from the owner's ESPHome log 2026-10-20 22:32 (fob A,
+#         slots 1-3 learned):
+#           * HA automation round trip (slot ON -> relay switched) was
+#             109-122 ms on every press - the automation is not the delay.
+#           * Three button-2 presses (22:32:07.024, 07.760, 08.291) were
+#             received but produced no trigger. Slot 2 had gone ON at 05.616
+#             and stayed ON until 09.202, because ONE script serves all four
+#             slots and every received code - from ANY button - restarted
+#             its 500 ms off-timer. Pressing B1 in between kept Slot 2
+#             latched, so the next B2 presses found it already ON and HA saw
+#             no off -> on edge.
+#         1. Window 500 ms -> 200 ms. Repeats inside one press arrive every
+#            ~40 ms (82 ms max seen, when one repeat is lost); separate taps
+#            were 369-487 ms apart. 200 ms keeps a held press as one pulse
+#            and lets taps more than 200 ms apart register separately. A
+#            re-press within 200 ms of the last repeat still counts as the
+#            same press. HA receives ON and OFF as pushed events, so a 200 ms
+#            pulse is still caught.
+#         2. A code that matches a DIFFERENT learned slot now releases the
+#            other slots immediately, so B2 -> B1 -> B2 triggers B2 twice.
+#            Two slots holding the same code still both fire, as before.
+#         3. on_rc_switch only starts rf_check_slots for a code that matches
+#            a learned slot. Before, EVERY received code (ambient 433 traffic,
+#            the protocol=4 mis-decode seen at 22:22:30.173) restarted the
+#            script and re-armed its off-timer. Now an unknown code changes
+#            nothing: it cannot hold a slot ON, and cannot drop a held slot
+#            mid-press and cause a double toggle.
+# v2.3.5  DS18B20 OFFSETS RECALCULATED. v2.3.4 used ONE reading and
+#         over-corrected (Grey then read 0.3 C above the others). New
+#         offsets = average raw difference from Grey over THREE readings
+#         with all four sensors together, untouched:
+#                      yesterday  today#1  today#2   avg    offset
+#           Clean        +0.3      -0.1     0.0    +0.07   -0.07
+#           Grey          0         0       0       0       0.00
+#           Pipe 1       +0.5      +0.2    +0.2    +0.30   -0.30
+#           Pipe 2       +0.3       0.0     0.0    +0.10   -0.10
+#         Check, spread after offsets: 0.23 / 0.17 / 0.10 C
+#         (v2.3.4 on today#2: 0.3 C).
+# v2.3.4  DS18B20 OFFSETS - all four aligned to the LOWEST sensor (Grey),
+#         from the owner's reading with all four together in the same air:
+#           Clean 12.4  Grey 12.1  Pipe 1 12.6  Pipe 2 12.4  (spread 0.5 C,
+#           inside the DS18B20 +/-0.5 C spec)
+#         offset = 12.1 - reading:
+#           Clean -0.3   Grey 0.0   Water Pipe 1 -0.5   Water Pipe 2 -0.3
+#         Applied BEFORE the 0.1 C rounding. This makes the four agree with
+#         each other; it does not check them against a true temperature.
+# v2.3.3  Renamed "Pipe 1 Temp" -> "Water Pipe 1 Temp" and
+#         "Pipe 2 Temp" -> "Water Pipe 2 Temp". Name only; addresses unchanged.
+# v2.3.2  DS18B20s get their final names (assigned in address order; the owner
+#         labels the physical sensors by warming each one):
+#           0C28 Clean Water Tank Temp   4628 Grey Water Tank Temp
+#           C628 Pipe 1 Temp             2F28 Pipe 2 Temp
+#         update_interval 10 s -> 60 s and round 0.1 C, so a stable reading
+#         writes no new database rows (same approach as the tank sensors).
+#         The temporary "1-Wire xxxx" entities disappear - delete them in HA
+#         if they linger as unavailable.
+# v2.3.1  IDENTIFICATION BUILD for the 4 DS18B20s. Each publishes under a
+#         temporary name = last 4 hex digits of its address (0C28, 4628,
+#         C628, 2F28), every 10 s. Warm one sensor at a time by hand, note
+#         which tag rises and where that sensor sits; v2.3.2 then gives them
+#         their final names and removes these temporary entities.
+# v2.3.0  1-WIRE BUS on GPIO14 (terminal "GPIO - 1-Wire", fed from 3V-DC +
+#         GND beside it, 4.7k pull-up to 3V-DC). Bus only. Found 4 DS18B20:
+#           0xXXXXXXXXXXXX0C28  0xXXXXXXXXXXXX4628
+#           0xXXXXXXXXXXXXC628  0xXXXXXXXXXXXX2F28
+# v2.2.0  STABILISER CIRCUIT SPLIT + AUTO-OFF.
+#         RE13 "Steps"  - electric steps moved off the 90A stabiliser feed
+#                         onto their own relay. ALWAYS_ON. Toggled by B12.
+#         RE15 "Stabilisers" - legs + front jack only. ALWAYS_OFF, and now
+#                         cuts itself after 10 MINUTES.
+#         RE16 "Tank & Pipe Heater" - reserved, nothing wired yet.
+#
+#         WHY THE SPLIT: the three loads have opposite duty cycles. Steps must
+#         stay live for hours while camped so the door reed works; legs and
+#         jack should only be live for the minutes you are actually using
+#         them. One relay could not serve both - any timeout short enough to
+#         protect the jack would kill the automatic steps.
+#         WHY THE TIMEOUT: the front jack has its own up/down buttons on the
+#         jack itself, reachable by anyone while the trailer sits at a petrol
+#         station; and the leg switches live in a storage box you reach into
+#         for other things. Cutting power makes every one of those buttons
+#         inert. 10 minutes covers hitching and setup; after that it is off
+#         whether or not anyone remembered.
+# v2.1.9  STABILISERS on RE15 + its locking switch on DI15.
+#         Why the switch did nothing before: button_15 had NO on_press at all
+#         - it was left as a bare spare input. KinCony's own panel buttons
+#         work because they drive the relays in hardware, bypassing ESPHome.
+#         Why a simple on_press+toggle would NOT have fixed it: the switch is
+#         MAINTAINED, so flipping it off produces a release, never a second
+#         press - the relay would latch on and stay on. It now follows both
+#         edges.
+#         Safety: relay ALWAYS_OFF at boot, and DI15 disarmed for 10s after
+#         boot, so a switch left ON through a reboot cannot re-energise the
+#         90A contactor by itself. Flip it off and on to restore power.
+#         DI15 confirmed as the right input from live HA data - it was the
+#         only input whose state changed after boot while testing.
+# v2.1.8  DATABASE CHURN. Measured in HA: clear_tank_voltage was writing
+#         12,312 state rows/day and clear_water_tank 10,224/day, because the
+#         ESP published the raw float (e.g. "11.641224861145") on every 5s
+#         update. accuracy_decimals is DISPLAY-ONLY - it does not change what
+#         is stored, and HA writes a row whenever the state STRING changes.
+#         Now: voltage rounded to 1 mV, tank percent to 0.1%. Both are well
+#         past the sensor's real resolution (~1 mV / 0.07%), so nothing
+#         readable is lost - but a stable reading now produces NO rows at all
+#         instead of one every five seconds.
+#         Expect roughly a 90-95% drop from these four sensors.
+# v2.1.6  Tidy-ups, no functional change to any entity:
+#           * OTA password -> encryption, reusing the API key. Removes the
+#             build warning about the password wasting ~3.5KB flash and 60
+#             bytes of heap, and encrypts the firmware image in transit.
+#           * minimum_chip_revision "3.1" - your chip is rev3.1, so the build
+#             can drop early-silicon workarounds and shrink the binary.
+#           * sram1_as_iram - the rev3 bootloader supports it: +40KB IRAM.
+#         FLASH THIS ONE OVER OTA WHILE THE PASSWORD STILL WORKS. After it is
+#         running, plaintext OTA is refused forever and a lost API key means
+#         a USB serial recovery.
+# v2.1.5  TANK READING NOISE. Both ADC channels had samples: 1 - no averaging
+#         inside each read - which is why the level danced 11-12.5%.
+#         Now samples: 32 plus median(5) plus a 60s sliding average:
+#           before  18 mV p-p  = 1.28% of tank
+#           after   ~1 mV      = ~0.07% of tank
+#         Publishing stays at every 5s; only the averaging window is longer.
+#         NOT changed: the 15-minute ramp visible in the voltage history
+#         (145 mV -> 290 mV after the gauges came on). That may be the sender
+#         settling, or just a one-off post-flash transient. Cycle the Water
+#         Gauges relay off, wait, on, and watch whether it ramps again before
+#         we add a warm-up guard - if it is real, the tank will read low for
+#         ~15 min after the 07:00 schedule and can trip a false CLEAR WATER
+#         LOW alert every morning.
+# v2.1.4  COMPILE FIX. In the on_rc_switch lambda, x.code is a uint64_t, not
+#         a string, so it cannot be concatenated onto a std::string - v2.1.3
+#         wrapped x.protocol in std::to_string but not x.code, and the build
+#         failed with "no match for operator+". Both are wrapped now.
+#         "RF Last Code" therefore reads protocol:code in DECIMAL, e.g.
+#         "1:5592332". That is what the slots store and compare, so it is
+#         self-consistent. Note it is NOT the binary form that rc_switch_raw
+#         expects - read the binary off the dump: rc_switch log line if you
+#         ever need to hard-code a remote in YAML.
+# v2.1.3  Removed the inverter-LED on_boot sync that was added in v2.1.2
+#         without being asked for. Nothing else changed.
+# v2.1.2  GAUGES SCHEDULE, run on the board itself.
+#           OFF at 00:00, ON at 07:00, driven by the DS3231 - so it keeps
+#           working with Home Assistant down, mid-update, or off-grid.
+#           "Gauges Schedule" switch in HA disables it. It defaults ON and
+#           is restored across reboots.
+#           Manual control is untouched: the schedule only acts at those two
+#           instants, so turning the gauges on at 01:00 keeps them on.
+#           No boot catch-up and no pinned timezone, both by your choice -
+#           the board follows whatever timezone it is given, and a reboot
+#           during the night can leave the gauges on until the next midnight.
+#         RESTORE: unchanged. All 16 relays were already RESTORE_DEFAULT_OFF,
+#           which means "restore what was saved, default off if nothing was" -
+#           exactly "a relay left on comes back on, nothing else does".
+# v2.1.1  RF433 is now LEARNABLE FROM HOME ASSISTANT - no recompile needed
+#         to add a new remote.
+#           * "RF Last Code" text sensor shows every code as it arrives,
+#             formatted protocol:code.
+#           * 4 slots ("RF Slot N Code") are HA text boxes, restore_value so
+#             they survive a reboot. Press a fob, then press "Learn Slot N"
+#             and the last code is copied in - no typing it out.
+#           * "RF Slot N Received" pulses for 500ms when a matching code
+#             arrives. Use that as the trigger in HA automations.
+#         BUFFER OVERFLOW FIX: buffer_size 2kb -> 10kb. 2kb gave only 192
+#         RMT symbols, which ambient 433 traffic overran constantly. Note
+#         dump: [] would NOT have fixed it - overflow happens at capture,
+#         before dumping.
+#         COMPILE-TIME ONLY, cannot be HA entities (ESPHome design): pin,
+#         filter, idle, tolerance, buffer_size, dump.
+# v2.1.0  Device renamed kc868-a16s -> relay-board.
+#         Entity ids become switch.relay_board_main_light etc, replacing
+#         switch.kc868_a16s_camper_panel_main_light. Minor version bump,
+#         not a patch, because EVERY entity id on this device changes -
+#         the dashboard must be repointed in the same step.
+#         Named for what it is: this board is the relay/IO controller, the
+#         "panel" is the button plate it drives.
+# v2.0.2  Added the two fitted expansion modules:
+#         * DS3231 RTC (socket A) - keeps time when the trailer is off-grid
+#           with no Home Assistant to sync from. ESPHome has no ds3231
+#           platform; the DS3231 is register-compatible with the DS1307, so
+#           platform: ds1307 at 0x68 is the correct and standard config.
+#         * RF433 receiver (socket F, GPIO16) - receives only, no transmitter
+#           on this board. Left in capture mode so you can learn your remotes;
+#           see the notes in that block before leaving it running long-term.
+#         Analog pinout re-confirmed against the KC868-A16S block diagram:
+#         A1=GPIO36 and A2=GPIO34 are the DC 0-5V channels (A3/A4 are 4-20mA
+#         current inputs and would be wrong for the tank senders).
+# v2.0.1  ADC pins confirmed against KinCony/ESPHome documentation:
+#         A1 = GPIO36 (Clear Water), A2 = GPIO34 (Grey Water).
+#         v2.0.0 had A2 on GPIO39 - that is A4. Fixed.
+#         Tank calibration is now expressed in BOARD-READ millivolts, read
+#         off the two diagnostic voltage sensors, not multimeter millivolts
+#         at the sender. Defaults 0 / 3000 mV. Reason: the A16S analog
+#         inputs are a conditioned 0-5V front end, so the ADC sees the
+#         sender through an unknown board divider. Calibrating on what the
+#         board actually reports removes that unknown instead of guessing
+#         at it - and means NO external divider should be fitted.
+# v2.0.0  First rebuild from the wiring doc: real names, RE11/RE12 inverter
+#         gang, B14->RE14 gauges, AI1/AI2 tank sensors.
+# Replaces the flat "Relay N / Button N" config.
+#
+# Source of truth: Camper_Front_12V_Cable_By_Cable_v9.pdf, corrected by
+# the owner where the build differs from the drawing:
+#   * RE11 = INVERTER dry contact   (drawing had this as the LED)
+#   * RE12 = B11 LED feedback       (drawing had this as the contact)
+#   * RE13 = spare
+#   * RE14 = WATER GAUGES, on its own button/input DI14 (drawing used 13)
+#
+# WHAT CHANGED vs the old config
+#   1. Real names. Relays and buttons keep their NUMBER in the id
+#      (relay_01, button_01) so they still match the wiring tags, while the
+#      HA name is plain ("Main Light"). Entity ids become
+#      switch.relay_board_main_light etc.
+#   2. INVERTER GANG: RE12 follows RE11 automatically, in both directions,
+#      so the panel LED is right whether the inverter is switched from the
+#      button, from Home Assistant, or from the board.
+#   3. GAUGES: B14 -> DI14 -> RE14.
+#   4. TANK LEVELS on AI1/AI2, published only while the gauges relay is on
+#      (the senders are unpowered otherwise, which would read as a false 0%).
+#      Calibration is exposed as numbers - see the note by the ADC block.
+#   5. DRL / K01 is deliberately NOT implemented - not connected yet.
+#
+# ADC pins are documented, not guessed - see v2.0.1 note above.
+# ============================================================
+
+# v2.3.8 - shown in HA as "Config Version". Bump both with every new version.
+substitutions:
+  config_version: "2.3.8"
+  config_date: "2026-10-20"
+
+esphome:
+  name: relay-board
+  friendly_name: Relay Board
+  on_boot:
+    # v2.1.9 - STABILISER BOOT LOCKOUT. The locking switch on DI15 holds its
+    # position through a reboot, so a "follow the switch" design would
+    # re-energise the 90A contactor the instant the input is read - with the
+    # jacks and steps live and nobody expecting it. Instead the input is
+    # DISARMED for the first 10s and the relay boots ALWAYS_OFF, so only a
+    # deliberate flip of the switch can power the circuit.
+    # CONSEQUENCE: reboot with the switch left ON and the jacks stay dead
+    # until you flip it off and back on. That is intended, not a fault.
+    priority: -200
+    then:
+      - delay: 10s
+      - lambda: 'id(stab_armed) = true;'
+      - logger.log: "Stabilisers: DI15 armed - switch will now drive the relay"
+
+globals:
+  - id: stab_armed
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+esp32:
+  board: esp32dev
+  framework:
+    type: arduino
+    advanced:
+      # v2.1.6 - both suggested by the build log on this exact board.
+      # Your chip reported "ESP32 rev3.1". Telling the build it will never
+      # run on anything older lets it drop the workarounds for the early
+      # silicon bugs, which shrinks the binary.
+      minimum_chip_revision: "3.1"
+      # The rev3 bootloader can map SRAM1 as instruction RAM: +40KB IRAM.
+      sram1_as_iram: true
+
+logger:
+
+api:
+  encryption:
+    key: !secret relay_board_api_key
+
+# v2.1.6 - OTA now uses the API encryption key instead of a password.
+# A bare `encryption:` reuses api: encryption: key:, so there is ONE key for
+# the device and nothing extra to store. This also encrypts the image itself -
+# with a password the firmware still crossed the network in plaintext, and that
+# image contains the API key.
+#
+# Password and encryption cannot coexist; the key authenticates the uploader,
+# so `password:` is removed rather than kept alongside.
+#
+# Safe to do now because the v2.1.4/v2.1.5 boot log already reported
+#   "Encryption: offered, plaintext accepted"
+# which is the condition ESPHome requires before this line can be added. Doing
+# it on firmware that did not offer encryption fails with
+#   "the device did not offer encryption; refusing to send the image in plaintext"
+#
+# ONE-WAY DOOR: once this is running, the device refuses plaintext OTA. If the
+# API key is ever lost, recovery is a USB serial flash - there is no OTA way
+# back. Key rotation over OTA is not supported yet either.
+ota:
+  - platform: esphome
+    encryption:
+
+# Ethernet only - do not add wifi/captive_portal alongside this
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  clk:
+    pin: GPIO17
+    mode: CLK_OUT
+  phy_addr: 0
+
+i2c:
+  sda: GPIO4
+  scl: GPIO5
+  scan: true
+  id: bus_a
+
+pcf8574:
+  - id: pcf8574_hub_out_1
+    address: 0x24
+  - id: pcf8574_hub_out_2
+    address: 0x25
+  - id: pcf8574_hub_in_1
+    address: 0x22
+  - id: pcf8574_hub_in_2
+    address: 0x23
+
+# v2.3.0 - 1-Wire bus for the DS18B20 temperature sensors.
+# Terminal "GPIO - 1-Wire" = GPIO14. Sensors are powered from the 3V-DC
+# terminal (NOT 12 V - a DS18B20 is rated 5.5 V max) with a 4.7k pull-up
+# from data to 3V-DC.
+one_wire:
+  - platform: gpio
+    pin: GPIO14
+    id: ow_bus
+
+
+# ============================================================
+# DS3231 REAL TIME CLOCK  (socket A, on the shared I2C bus, 0x68)
+#
+# Why both entries: the RTC is the fallback, Home Assistant is the master.
+# On boot the ESP reads the DS3231 so it has a sane clock even with no
+# network; whenever HA does connect, the corrected time is written back to
+# the RTC so the battery-backed clock never drifts far.
+#
+# Timezone is deliberately NOT pinned here - the trailer moves, and HA is
+# the time authority whenever it is reachable. Add `timezone:` under the
+# ds1307 entry if you ever want the board to be right on its own abroad.
+# ============================================================
+time:
+  - platform: ds1307
+    id: rtc_time
+    address: 0x68
+    update_interval: 15min
+    # Gauges schedule. Driven from the RTC, not from HA, so it survives an HA
+    # outage. Both triggers are gated on the Gauges Schedule switch.
+    on_time:
+      - seconds: 0
+        minutes: 0
+        hours: 0
+        then:
+          - if:
+              condition:
+                switch.is_on: gauges_schedule
+              then:
+                - switch.turn_off: relay_14
+      - seconds: 0
+        minutes: 0
+        hours: 7
+        then:
+          - if:
+              condition:
+                switch.is_on: gauges_schedule
+              then:
+                - switch.turn_on: relay_14
+
+  - platform: homeassistant
+    id: ha_time
+    on_time_sync:
+      then:
+        - ds1307.write_time:
+
+
+# ============================================================
+# RF433 RECEIVER  (socket F, GPIO16)   -  RECEIVE ONLY
+#
+# The A16S has a receiver socket but no transmitter, so this can learn and
+# react to remotes/sensors but cannot send.
+#
+# HOW TO LEARN A REMOTE
+#   1. Flash this, open the ESPHome log, press a button on the remote.
+#   2. You get a line like:  rc_switch: protocol=1 data='101010...'
+#   3. Add a binary_sensor for it, e.g.:
+#        binary_sensor:
+#          - platform: remote_receiver
+#            name: "Key Fob A"
+#            rc_switch_raw:
+#              code: '000101010101010101010001'
+#              protocol: 1
+#   4. Once your remotes are learned, change `dump:` to [] to stop the log
+#      spam - a 433 receiver hears every doorbell and weather station in
+#      range, and dumping all of it wastes CPU and fills the log.
+#
+# dump is set to rc_switch (what cheap 433 fobs use). If your remote does
+# not show up, widen it to `dump: all` temporarily.
+# ============================================================
+remote_receiver:
+  id: rf433
+  pin:
+    number: GPIO16
+    mode:
+      input: true
+  dump: rc_switch
+  # tuned for 433MHz OOK: ignore sub-250us glitches, 4ms gap ends a packet
+  filter: 250us
+  idle: 4ms
+  tolerance: 50%
+  # v2.1.1: 2kb (192 RMT symbols) overflowed constantly on ambient traffic.
+  buffer_size: 10kb
+  on_rc_switch:
+    then:
+      - text_sensor.template.publish:
+          id: rf_last_code
+          state: !lambda 'return std::to_string(x.protocol) + ":" + std::to_string(x.code);'
+      # v2.3.6 - only a code that matches a learned slot runs the slot script.
+      # rf_check_slots is mode: restart, so before this gate EVERY received
+      # code - doorbells, weather stations, the odd protocol=4 mis-decode -
+      # re-armed its off-timer and could hold a slot ON past the press.
+      - if:
+          condition:
+            lambda: |-
+              std::string s = id(rf_last_code).state;
+              return !s.empty() && (s == id(rf_slot_1).state ||
+                                    s == id(rf_slot_2).state ||
+                                    s == id(rf_slot_3).state ||
+                                    s == id(rf_slot_4).state ||
+                                    s == id(rf_slot_5).state ||
+                                    s == id(rf_slot_6).state);
+          then:
+            - script.execute: rf_check_slots
+
+text_sensor:
+  - platform: template
+    name: "RF Last Code"
+    id: rf_last_code
+    icon: mdi:remote
+    update_interval: never
+    entity_category: diagnostic
+
+  # ---- v2.3.8: STATUS ENTITIES ----
+  # Republished hourly; HA only writes a row when the text changes, so this
+  # costs one row per firmware version.
+  - platform: template
+    name: "Config Version"
+    id: config_version_sensor
+    icon: mdi:tag-text
+    entity_category: diagnostic
+    update_interval: 3600s
+    lambda: |-
+      return std::string("${config_version} (${config_date})");
+
+  - platform: version
+    name: "ESPHome Version"
+    entity_category: diagnostic
+
+  - platform: ethernet_info
+    ip_address:
+      name: "IP Address"
+      entity_category: diagnostic
+
+# HA-editable code slots. restore_value keeps them across reboots.
+text:
+  - platform: template
+    name: "RF Slot 1 Code"
+    id: rf_slot_1
+    optimistic: true
+    restore_value: true
+    mode: text
+    max_length: 64
+    icon: mdi:remote
+    entity_category: config
+
+  - platform: template
+    name: "RF Slot 2 Code"
+    id: rf_slot_2
+    optimistic: true
+    restore_value: true
+    mode: text
+    max_length: 64
+    icon: mdi:remote
+    entity_category: config
+
+  - platform: template
+    name: "RF Slot 3 Code"
+    id: rf_slot_3
+    optimistic: true
+    restore_value: true
+    mode: text
+    max_length: 64
+    icon: mdi:remote
+    entity_category: config
+
+  - platform: template
+    name: "RF Slot 4 Code"
+    id: rf_slot_4
+    optimistic: true
+    restore_value: true
+    mode: text
+    max_length: 64
+    icon: mdi:remote
+    entity_category: config
+
+  # v2.3.7 - slots 5 and 6
+  - platform: template
+    name: "RF Slot 5 Code"
+    id: rf_slot_5
+    optimistic: true
+    restore_value: true
+    mode: text
+    max_length: 64
+    icon: mdi:remote
+    entity_category: config
+
+  - platform: template
+    name: "RF Slot 6 Code"
+    id: rf_slot_6
+    optimistic: true
+    restore_value: true
+    mode: text
+    max_length: 64
+    icon: mdi:remote
+    entity_category: config
+
+# One-press learn: copies whatever arrived last into the slot.
+button:
+  # v2.3.8 - reboots the board. RE15 Stabilisers comes back OFF (ALWAYS_OFF,
+  # DI15 locked out for 10 s); every other relay restores its saved state.
+  - platform: restart
+    name: "Restart"
+    icon: mdi:restart
+
+  - platform: template
+    name: "Learn Slot 1"
+    icon: mdi:school
+    entity_category: config
+    on_press:
+      - text.set:
+          id: rf_slot_1
+          value: !lambda 'return id(rf_last_code).state;'
+
+  - platform: template
+    name: "Learn Slot 2"
+    icon: mdi:school
+    entity_category: config
+    on_press:
+      - text.set:
+          id: rf_slot_2
+          value: !lambda 'return id(rf_last_code).state;'
+
+  - platform: template
+    name: "Learn Slot 3"
+    icon: mdi:school
+    entity_category: config
+    on_press:
+      - text.set:
+          id: rf_slot_3
+          value: !lambda 'return id(rf_last_code).state;'
+
+  - platform: template
+    name: "Learn Slot 4"
+    icon: mdi:school
+    entity_category: config
+    on_press:
+      - text.set:
+          id: rf_slot_4
+          value: !lambda 'return id(rf_last_code).state;'
+
+  # v2.3.7 - slots 5 and 6
+  - platform: template
+    name: "Learn Slot 5"
+    icon: mdi:school
+    entity_category: config
+    on_press:
+      - text.set:
+          id: rf_slot_5
+          value: !lambda 'return id(rf_last_code).state;'
+
+  - platform: template
+    name: "Learn Slot 6"
+    icon: mdi:school
+    entity_category: config
+    on_press:
+      - text.set:
+          id: rf_slot_6
+          value: !lambda 'return id(rf_last_code).state;'
+
+script:
+  # v2.2.0 - see the note on relay_15. mode: restart so switching the
+  # stabilisers off and on again restarts the full 10 minutes rather than
+  # inheriting whatever was left of the previous run.
+  - id: stabiliser_timeout
+    mode: restart
+    then:
+      - delay: 10min
+      - logger.log: "Stabilisers: 10 minute timeout - cutting power"
+      - switch.turn_off: relay_15
+
+  # Compares the code that just arrived against each stored slot and holds
+  # the matching sensor ON while the fob keeps repeating; mode: restart
+  # re-arms the off-timer on every received code, so the sensor drops OFF
+  # 200ms after the last repeat.
+  # v2.3.6 - window 500ms -> 200ms. Repeats inside one press arrive every
+  # ~40 ms (82 ms max seen), separate taps were 369-487 ms apart: 200ms keeps
+  # a held press as one pulse and lets separate taps through. HA receives ON
+  # and OFF as pushed events, so the shorter pulse is still caught.
+  # v2.3.6 - a code matching a DIFFERENT learned slot releases the other
+  # slots at once (B2 -> B1 -> B2 now fires B2 twice). Two slots holding the
+  # same code still both fire. Unknown codes never reach this script - see
+  # the v2.3.6 gate in on_rc_switch.
+  - id: rf_check_slots
+    mode: restart
+    then:
+      - lambda: |-
+          std::string s = id(rf_last_code).state;
+          if (s.empty()) return;
+          bool m1 = (s == id(rf_slot_1).state);
+          bool m2 = (s == id(rf_slot_2).state);
+          bool m3 = (s == id(rf_slot_3).state);
+          bool m4 = (s == id(rf_slot_4).state);
+          bool m5 = (s == id(rf_slot_5).state);
+          bool m6 = (s == id(rf_slot_6).state);
+          if (!(m1 || m2 || m3 || m4 || m5 || m6)) return;   // not a learned code: leave the slots alone
+          id(rf_match_1).publish_state(m1);
+          id(rf_match_2).publish_state(m2);
+          id(rf_match_3).publish_state(m3);
+          id(rf_match_4).publish_state(m4);
+          id(rf_match_5).publish_state(m5);
+          id(rf_match_6).publish_state(m6);
+      - delay: 200ms
+      - lambda: |-
+          id(rf_match_1).publish_state(false);
+          id(rf_match_2).publish_state(false);
+          id(rf_match_3).publish_state(false);
+          id(rf_match_4).publish_state(false);
+          id(rf_match_5).publish_state(false);
+          id(rf_match_6).publish_state(false);
+
+
+# ============================================================
+# TANK CALIBRATION   -   values are BOARD-READ millivolts
+#
+# HOW TO SET THESE (no maths, no multimeter):
+#   1. Turn on "Water Gauges".
+#   2. With the tank EMPTY, read "Clear Tank Voltage" (a diagnostic sensor,
+#      in volts) and enter it x1000 as "Clear Tank Empty mV".
+#   3. Fill to the brim, read it again, enter as "Clear Tank Full mV".
+#   4. Same for grey. Done.
+#
+# Why not the sender millivolts measured at the wire: the A16S analog inputs
+# are a conditioned 0-5V front end, so the ADC sees the sender through a
+# board divider of unknown ratio. Calibrating on the board's own reported
+# voltage cancels that ratio out. Do NOT fit an external divider.
+#
+# Sender-side measurements taken 2026-09-25, for reference / sanity only:
+#   clear  12% on the digital gauge @ 375.0 then 388.9 mV
+#   grey    0% on the digital gauge @  37.0 then  41.2 mV
+#   -> ~30 mV per %, zero at ~0 mV (the ~40 mV on grey is not an electrical
+#      offset, it is ~3 mm of water left in the bottom of a drained tank:
+#      1.4% of a 20-25 cm deep tank). Full scale should be ~3000-3100 mV at
+#      the sender. Expect ~50% at roughly half that.
+#   -> resolution is ~120-145 mV per cm of water, so the few mV of observed
+#      drift is about 0.3 mm. Noise is a non-issue.
+# ============================================================
+number:
+  - platform: template
+    name: "Clear Tank Empty mV"
+    id: clear_empty_mv
+    unit_of_measurement: "mV"
+    min_value: 0
+    max_value: 1000
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Clear Tank Full mV"
+    id: clear_full_mv
+    unit_of_measurement: "mV"
+    min_value: 500
+    max_value: 3100
+    step: 1
+    initial_value: 3000
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Grey Tank Empty mV"
+    id: grey_empty_mv
+    unit_of_measurement: "mV"
+    min_value: 0
+    max_value: 1000
+    step: 1
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+  - platform: template
+    name: "Grey Tank Full mV"
+    id: grey_full_mv
+    unit_of_measurement: "mV"
+    min_value: 500
+    max_value: 3100
+    step: 1
+    initial_value: 3000
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+
+
+# ============================================================
+# RELAY OUTPUTS
+# ids keep the wiring number (relay_01 = RE01); names are what HA shows
+# ============================================================
+switch:
+
+  # ---- Schedule enable (v2.1.2) ----
+  # Not a relay. Turning this off in HA stops the 00:00/07:00 gauges
+  # schedule without touching the gauges themselves.
+  - platform: template
+    name: "Gauges Schedule"
+    id: gauges_schedule
+    icon: mdi:calendar-clock
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_ON
+    entity_category: config
+
+  - platform: gpio
+    name: "Main Light"
+    id: relay_01
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 0
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Outdoor Left"
+    id: relay_02
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 1
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Bedroom Light"
+    id: relay_03
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 2
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Front Outdoor"
+    id: relay_04
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 3
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Main Bedroom Red"
+    id: relay_05
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 4
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Outdoor Right"
+    id: relay_06
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 5
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Fan"
+    id: relay_07
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 6
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Awning Red Left"
+    id: relay_08
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_1
+      number: 7
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Water Pump"
+    id: relay_09
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_2
+      number: 0
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Awning Red Right"
+    id: relay_10
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_2
+      number: 1
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Inverter"
+    id: relay_11
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_2
+      number: 2
+      mode: OUTPUT
+      inverted: true
+    # RE11 is the dry contact that actually switches the inverter. RE12 only
+    # lights the B11 button LED (B11 has no lamp of its own), so it is ganged
+    # here rather than in an HA automation - that way the LED is still correct
+    # if Home Assistant is down.
+    on_turn_on:
+      - switch.turn_on: relay_12
+    on_turn_off:
+      - switch.turn_off: relay_12
+
+  - platform: gpio
+    name: "Inverter LED"
+    id: relay_12
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_2
+      number: 3
+      mode: OUTPUT
+      inverted: true
+    entity_category: diagnostic
+
+  # v2.2.0 - RE13 now feeds the ELECTRIC STEPS, split off the 90A stabiliser
+  # circuit so the two can follow different rules. The steps need power for
+  # hours or days while camped (the door reed drives them automatically),
+  # whereas the legs and front jack should only be live for minutes.
+  # ALWAYS_ON: the steps are the low-risk load - no exposed buttons, only the
+  # door reed - and if this came up off after a reboot the automatic steps
+  # would silently stop working until the next time you opened the door and
+  # nothing happened. DI12 still switches it off by hand for travel.
+  - platform: gpio
+    name: "Steps"
+    id: relay_13
+    icon: mdi:stairs
+    restore_mode: ALWAYS_ON
+    pin:
+      pcf8574: pcf8574_hub_out_2
+      number: 4
+      mode: OUTPUT
+      inverted: true
+
+  - platform: gpio
+    name: "Water Gauges"
+    id: relay_14
+    restore_mode: RESTORE_DEFAULT_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_2
+      number: 5
+      mode: OUTPUT
+      inverted: true
+
+  # v2.1.9 - RE15 drives a 90A contactor feeding the corner stabiliser jacks,
+  # the front hitch jack and the electric steps, from their own fuse box.
+  # ALWAYS_OFF, never RESTORE: powering that circuit unattended after a reboot
+  # is dangerous, so it must always come up dead regardless of what it was
+  # doing before.
+  - platform: gpio
+    name: "Stabilisers"
+    id: relay_15
+    icon: mdi:screw-lag
+    restore_mode: ALWAYS_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_2
+      number: 6
+      mode: OUTPUT
+      inverted: true
+    # v2.2.0 - 10 MINUTE AUTO-OFF. The real risk here is not driving away with
+    # legs down; it is that the front jack's up/down buttons are physically
+    # exposed, so anyone can press them while the trailer is parked and you are
+    # not there - and that reaching into the storage box can nudge a leg switch
+    # by accident. A dead circuit makes all of those buttons do nothing.
+    # The circuit only genuinely needs power for the few minutes of hitching,
+    # unhitching or setting up, so it times itself out rather than relying on
+    # anyone remembering. Switch it on again by hand whenever you need it.
+    on_turn_on:
+      - script.execute: stabiliser_timeout
+    on_turn_off:
+      - script.stop: stabiliser_timeout
+
+  # v2.2.0 - RESERVED, nothing wired to it yet. One circuit feeding both the
+  # tank heating pad and the water-pipe heater (the owner: "for both"). Named now
+  # so the entity id is settled before anything depends on it - renaming it
+  # later would mean another dashboard migration.
+  - platform: gpio
+    name: "Tank & Pipe Heater"
+    id: relay_16
+    icon: mdi:heat-wave
+    restore_mode: ALWAYS_OFF
+    pin:
+      pcf8574: pcf8574_hub_out_2
+      number: 7
+      mode: OUTPUT
+      inverted: true
+
+
+# ============================================================
+# TANK LEVEL SENSORS  (AI1 / AI2)
+# The gauge senders are only powered when RE14 is on, so when the gauges are
+# off we publish NAN (HA shows "unavailable") instead of a misleading 0%.
+# ============================================================
+sensor:
+  # v2.3.8 - 15 min interval = 96 rows/day (every 60 s would be 1,440).
+  - platform: uptime
+    name: "Uptime"
+    update_interval: 15min
+    entity_category: diagnostic
+
+  - platform: adc
+    pin: GPIO36          # AI1 = ANALOG_A1 - confirmed in KC868-A16S docs
+    id: ai1_raw
+    name: "Clear Tank Voltage"
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    attenuation: 12db
+    update_interval: 5s
+    entity_category: diagnostic
+    # v2.1.5 - measured 282..300 mV on a still tank = 18 mV peak-to-peak.
+    # At 14.05 mV per 1% of tank that is 1.28% of visible jitter, which is
+    # exactly the 11-12.5% wobble seen in HA.
+    #   samples: 32  averages 32 reads INSIDE each update. Noise falls with
+    #                sqrt(N), so 32 cuts it to ~0.23%. This was set to 1,
+    #                i.e. no averaging at all - the single biggest win here.
+    #   median 5     rejects the occasional one-off spike (25s of history).
+    #   sliding avg  12 x 5s = a 60s mean -> ~0.07% residual jitter.
+    # Still publishes every 5s; the window just slides. A tank cannot change
+    # meaningfully in 60s unless you are actively filling it, so the settling
+    # time costs nothing.
+    samples: 32
+    filters:
+      - median:
+          window_size: 5
+          send_every: 1
+      - sliding_window_moving_average:
+          window_size: 12
+          send_every: 1
+      # v2.1.8 - publish at 1 mV resolution. Without this the full float goes
+      # to HA ("0.29166665673255920"), so EVERY 5s update was a new database
+      # row: 12,312 rows/day from this one sensor. accuracy_decimals only
+      # affects DISPLAY, not the stored value. HA writes a row only when the
+      # state string changes, so rounding a now-stable value cuts the churn
+      # without losing anything you can read.
+      - round: 3
+
+  - platform: adc
+    pin: GPIO34          # AI2 = ANALOG_A2 - confirmed (GPIO39 is A4)
+    id: ai2_raw
+    name: "Grey Tank Voltage"
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    attenuation: 12db
+    update_interval: 5s
+    entity_category: diagnostic
+    # v2.1.5 - measured 282..300 mV on a still tank = 18 mV peak-to-peak.
+    # At 14.05 mV per 1% of tank that is 1.28% of visible jitter, which is
+    # exactly the 11-12.5% wobble seen in HA.
+    #   samples: 32  averages 32 reads INSIDE each update. Noise falls with
+    #                sqrt(N), so 32 cuts it to ~0.23%. This was set to 1,
+    #                i.e. no averaging at all - the single biggest win here.
+    #   median 5     rejects the occasional one-off spike (25s of history).
+    #   sliding avg  12 x 5s = a 60s mean -> ~0.07% residual jitter.
+    # Still publishes every 5s; the window just slides. A tank cannot change
+    # meaningfully in 60s unless you are actively filling it, so the settling
+    # time costs nothing.
+    samples: 32
+    filters:
+      - median:
+          window_size: 5
+          send_every: 1
+      - sliding_window_moving_average:
+          window_size: 12
+          send_every: 1
+      # v2.1.8 - publish at 1 mV resolution. Without this the full float goes
+      # to HA ("0.29166665673255920"), so EVERY 5s update was a new database
+      # row: 12,312 rows/day from this one sensor. accuracy_decimals only
+      # affects DISPLAY, not the stored value. HA writes a row only when the
+      # state string changes, so rounding a now-stable value cuts the churn
+      # without losing anything you can read.
+      - round: 3
+
+  - platform: template
+    name: "Clear Water Tank"
+    id: clear_tank_pct
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: mdi:cup-water
+    update_interval: 5s
+    lambda: |-
+      if (!id(relay_14).state) return NAN;          // gauges off -> no signal
+      float v = id(ai1_raw).state; if (isnan(v)) return NAN;
+      float mv = v * 1000.0f;
+      float e = id(clear_empty_mv).state, f = id(clear_full_mv).state;
+      if (isnan(e) || isnan(f) || f <= e) return NAN;
+      float p = (mv - e) / (f - e) * 100.0f;
+      return p < 0 ? 0 : (p > 100 ? 100 : p);
+    # v2.1.8 - 0.1% resolution; see the note on the voltage sensors.
+    filters:
+      - round: 1
+
+  - platform: template
+    name: "Grey Water Tank"
+    id: grey_tank_pct
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: mdi:water-opacity
+    update_interval: 5s
+    lambda: |-
+      if (!id(relay_14).state) return NAN;
+      float v = id(ai2_raw).state; if (isnan(v)) return NAN;
+      float mv = v * 1000.0f;
+      float e = id(grey_empty_mv).state, f = id(grey_full_mv).state;
+      if (isnan(e) || isnan(f) || f <= e) return NAN;
+      float p = (mv - e) / (f - e) * 100.0f;
+      return p < 0 ? 0 : (p > 100 ? 100 : p);
+    # v2.1.8 - 0.1% resolution; see the note on the voltage sensors.
+    filters:
+      - round: 1
+
+  # ---- v2.3.2: DS18B20 TEMPERATURES (1-Wire bus on GPIO14) ----
+  # Tag = last 4 hex digits of the address, as written on the sensor label.
+  # round 0.1 C: DS18B20 resolution is 0.0625 C; rounding keeps a steady
+  # reading from writing a new database row every update.
+  - platform: dallas_temp
+    one_wire_id: ow_bus
+    address: !secret ds18b20_clean_tank   # tag 0C28
+    name: "Clean Water Tank Temp"
+    update_interval: 60s
+    filters:
+      - offset: -0.07   # v2.3.5 - 3-reading average vs Grey
+      - round: 1
+  - platform: dallas_temp
+    one_wire_id: ow_bus
+    address: !secret ds18b20_grey_tank   # tag 4628
+    name: "Grey Water Tank Temp"
+    update_interval: 60s
+    filters:
+      - offset: 0.0   # v2.3.5 - 3-reading average vs Grey
+      - round: 1
+  - platform: dallas_temp
+    one_wire_id: ow_bus
+    address: !secret ds18b20_pipe_1   # tag C628
+    name: "Water Pipe 1 Temp"
+    update_interval: 60s
+    filters:
+      - offset: -0.3   # v2.3.5 - 3-reading average vs Grey
+      - round: 1
+  - platform: dallas_temp
+    one_wire_id: ow_bus
+    address: !secret ds18b20_pipe_2   # tag 2F28
+    name: "Water Pipe 2 Temp"
+    update_interval: 60s
+    filters:
+      - offset: -0.1   # v2.3.5 - 3-reading average vs Grey
+      - round: 1
+
+
+# ============================================================
+# PANEL BUTTONS  (momentary, dry contact to GND)
+# Bnn -> DInn -> toggles its relay. ids keep the number.
+# B12 is wired to DI12 but has no load - left as a plain input.
+# DI15/DI16 unused. DRL/K01 intentionally not implemented.
+# ============================================================
+binary_sensor:
+
+  - platform: gpio
+    name: "Main Light Button"
+    id: button_01
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 0
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_01
+
+  - platform: gpio
+    name: "Outdoor Left Button"
+    id: button_02
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 1
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_02
+
+  - platform: gpio
+    name: "Bedroom Light Button"
+    id: button_03
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 2
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_03
+
+  - platform: gpio
+    name: "Front Outdoor Button"
+    id: button_04
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 3
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_04
+
+  - platform: gpio
+    name: "Main Bedroom Red Button"
+    id: button_05
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 4
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_05
+
+  - platform: gpio
+    name: "Outdoor Right Button"
+    id: button_06
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 5
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_06
+
+  - platform: gpio
+    name: "Fan Button"
+    id: button_07
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 6
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_07
+
+  - platform: gpio
+    name: "Awning Red Left Button"
+    id: button_08
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_1
+      number: 7
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_08
+
+  - platform: gpio
+    name: "Water Pump Button"
+    id: button_09
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_2
+      number: 0
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_09
+
+  - platform: gpio
+    name: "Awning Red Right Button"
+    id: button_10
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_2
+      number: 1
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_10
+
+  - platform: gpio
+    name: "Inverter Button"
+    id: button_11
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_2
+      number: 2
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_11
+
+  # v2.2.0 - B12 now toggles the STEPS relay (RE13). DI12 was free; confirmed
+  # against the live board before wiring it here.
+  - platform: gpio
+    name: "Steps Button"
+    id: button_12
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_2
+      number: 3
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_13
+
+  - platform: gpio
+    name: "Spare Button 13"
+    id: button_13
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_2
+      number: 4
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+
+  - platform: gpio
+    name: "Gauges Button"
+    id: button_14
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_2
+      number: 5
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - switch.toggle: relay_14
+
+  # v2.1.9 - LOCKING (maintained) switch, not momentary. The other ten buttons
+  # are spring-return and use on_press + switch.toggle; that is wrong here,
+  # because a latching switch never generates a second press to turn things
+  # off. This one drives the relay from both EDGES so the relay follows the
+  # switch - but only once armed (see the boot lockout in esphome: on_boot).
+  - platform: gpio
+    name: "Stabilisers Button"
+    id: button_15
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_2
+      number: 6
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+    on_press:
+      - if:
+          condition:
+            lambda: 'return id(stab_armed);'
+          then:
+            - switch.turn_on: relay_15
+          else:
+            - logger.log: "Stabilisers: switch ON ignored - still in boot lockout"
+    on_release:
+      - if:
+          condition:
+            lambda: 'return id(stab_armed);'
+          then:
+            - switch.turn_off: relay_15
+
+  - platform: gpio
+    name: "Spare Button 16"
+    id: button_16
+    entity_category: diagnostic
+    pin:
+      pcf8574: pcf8574_hub_in_2
+      number: 7
+      mode: INPUT
+      inverted: true
+    filters:
+      - delayed_on: 50ms
+      - delayed_off: 50ms
+
+  # ---- RF433 slot match outputs (v2.1.1) ----
+  - platform: template
+    name: "RF Slot 1 Received"
+    id: rf_match_1
+    icon: mdi:remote
+
+  - platform: template
+    name: "RF Slot 2 Received"
+    id: rf_match_2
+    icon: mdi:remote
+
+  - platform: template
+    name: "RF Slot 3 Received"
+    id: rf_match_3
+    icon: mdi:remote
+
+  - platform: template
+    name: "RF Slot 4 Received"
+    id: rf_match_4
+    icon: mdi:remote
+
+  # v2.3.7 - slots 5 and 6
+  - platform: template
+    name: "RF Slot 5 Received"
+    id: rf_match_5
+    icon: mdi:remote
+
+  - platform: template
+    name: "RF Slot 6 Received"
+    id: rf_match_6
+    icon: mdi:remote
+
+  # ---- v2.3.8: connected to Home Assistant ----
+  - platform: status
+    name: "Status"
+    entity_category: diagnostic
+

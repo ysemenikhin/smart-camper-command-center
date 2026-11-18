@@ -1,0 +1,188 @@
+# ============================================================
+# SMART CAMPER - VOICE ANNOUNCEMENTS  (v4)
+# Drop this in /homeassistant/packages/camper_voice.yaml
+# (your configuration.yaml already does: packages: !include_dir_named packages)
+#
+# Speaks suspension events on the tablet via the Home Assistant Companion
+# app's TTS notification (no media_player entity is needed).
+#
+# v4 - FULLY LOCAL when possible. The TTS engine is auto-selected: if a
+#      Piper entity exists (local add-on, no internet) it is used; otherwise
+#      it falls back to Home Assistant Cloud. Delivery was already local via
+#      Browser Mod, so with Piper installed the whole chain works offline.
+# v3 - targets media_player.camper_tablet_browser_mode by name (with
+#      auto-discovery kept as a fallback).
+# v2 - speaks LOCALLY via Browser Mod + HA Cloud TTS (was the Companion-app
+#      notification, which routes through Google push and arrived ~1 minute
+#      late because of Android Doze). The Browser Mod media_player is
+#      auto-discovered, and the old notification path is kept as a fallback
+#      for when the HA app is closed.
+#
+# >>> TO CHANGE THE VOICE: edit `voice:` in script.camper_say below.
+#
+# Scope: suspension only (modes + auto-level). Lighting/relay announcements
+# can be added later by calling script.camper_say from anywhere.
+# ============================================================
+
+script:
+  # Single place where speech actually happens. Call it from anywhere:
+  #   action: script.camper_say
+  #   data: { text: "Whatever you want said" }
+  #
+  # v2: speaks LOCALLY through Browser Mod (the HA app on the tablet) using
+  # Home Assistant Cloud TTS - no Google push servers, so no ~1 minute Doze
+  # delay. The Browser Mod player is found automatically, so a re-registered
+  # browser (new random id) keeps working. If the app is closed / the player
+  # is gone, it falls back to the Companion-app notification.
+  #
+  # >>> TO CHANGE THE VOICE: edit `voice:` below. Cloud (Azure) en-US options
+  #     include JennyNeural, AriaNeural, MichelleNeural (female) and
+  #     GuyNeural, RyanNeural, DavisNeural, TonyNeural (male).
+  camper_say:
+    alias: "Camper Say"
+    icon: mdi:account-voice
+    mode: queued
+    max: 10
+    fields:
+      text:
+        name: Text
+        description: What to speak
+        required: true
+        selector:
+          text:
+    variables:
+      # Cloud voice, only used when falling back to Home Assistant Cloud.
+      # en-US options: JennyNeural / AriaNeural / MichelleNeural (female),
+      #                GuyNeural / RyanNeural / DavisNeural (male).
+      voice: "JennyNeural"
+      # TTS engine: prefer LOCAL Piper if installed, else HA Cloud (internet).
+      engine: >
+        {% set p = states.tts
+                   | selectattr('entity_id', 'search', 'piper')
+                   | map(attribute='entity_id') | list | first | default('', true) %}
+        {{ p if p != '' else 'tts.home_assistant_cloud' }}
+      # The tablet's Browser Mod player. Uses the named entity when it is
+      # alive, otherwise falls back to auto-discovering any browser_mod
+      # player (so a re-registered browser still works).
+      player: >
+        {% set fixed = 'media_player.camper_tablet_browser_mode' %}
+        {% if states(fixed) not in ['unavailable', 'unknown', 'none'] %}
+          {{ fixed }}
+        {% else %}
+          {{ states.media_player
+             | selectattr('entity_id', 'search', 'browser_mod')
+             | rejectattr('state', 'in', ['unavailable', 'unknown'])
+             | map(attribute='entity_id') | list | first | default('', true) }}
+        {% endif %}
+    sequence:
+      # skip silently if the caller passed an empty string
+      - condition: template
+        value_template: "{{ text | default('') | trim != '' }}"
+      - choose:
+          # --- preferred: local speech via the tablet's HA app ---
+          - conditions:
+              - condition: template
+                value_template: "{{ player != '' }}"
+            sequence:
+              # Local Piper needs no voice option; Cloud takes the voice name.
+              - choose:
+                  - conditions:
+                      - condition: template
+                        value_template: "{{ 'piper' in engine }}"
+                    sequence:
+                      - action: tts.speak
+                        target:
+                          entity_id: "{{ engine }}"
+                        data:
+                          media_player_entity_id: "{{ player }}"
+                          message: "{{ text | trim }}"
+                default:
+                  - action: tts.speak
+                    target:
+                      entity_id: "{{ engine }}"
+                    data:
+                      media_player_entity_id: "{{ player }}"
+                      message: "{{ text | trim }}"
+                      options:
+                        voice: "{{ voice }}"
+        # --- fallback: Companion-app notification (works when the app is
+        #     closed, but goes via Google push so it can lag) ---
+        default:
+          - action: notify.mobile_app_camper_tablet
+            data:
+              message: TTS
+              data:
+                tts_text: "{{ text | trim }}"
+                media_stream: music_stream
+
+automation:
+  # Speaks every meaningful change of the ESP's preset_status text. Because the
+  # firmware already writes plain-language states there, this one automation
+  # covers mode changes, levelling progress and the ramp/jockey prompts - and
+  # will pick up any new status we add later.
+  - alias: "Camper - Announce suspension status"
+    id: camper_announce_suspension_status
+    mode: queued
+    max: 10
+    trigger:
+      - platform: state
+        entity_id: sensor.camper_air_suspension_preset_status
+    condition:
+      - condition: template
+        value_template: >
+          {{ trigger.to_state.state not in ['unknown','unavailable','','none']
+             and trigger.from_state is not none
+             and trigger.from_state.state != trigger.to_state.state }}
+    action:
+      - action: script.camper_say
+        data:
+          text: >
+            {% set s = trigger.to_state.state %}
+            {% set m = s | replace(' (PSI)','') %}
+            {% if s.startswith('Applying') %}
+              {{ m | replace('Applying ','') }} mode. Adjusting.
+            {% elif s.startswith('Reached') %}
+              {{ m | replace('Reached ','') }} mode set.
+            {% elif s.startswith('Maintaining') %}
+              {{ m | replace('Maintaining ','') }} mode set. Auto maintain is on.
+            {% elif s == 'Leveling - working' %}
+              Auto levelling started.
+            {% elif s == 'Leveled' %}
+              Trailer is level.
+            {% elif s == 'Leveling - waiting for air' %}
+              Waiting for air.
+            {% elif s == 'Level - low air, charge tank' %}
+              Low air. Charge the tank.
+            {% elif s == 'Level - stopped before level' %}
+              Levelling stopped before level.
+            {% elif s == "Level - can't settle, use ramp/jack" %}
+              Cannot settle the trailer. Use a ramp or jack.
+            {% elif s.startswith('Level limit') %}
+              Levelling travel limit reached. Use a ramp or jack.
+            {% elif s.startswith('Roll limit') %}
+              Cannot level.
+              {% if 'left' in s %} Add a ramp under the left side.
+              {% else %} Add a ramp under the right side. {% endif %}
+            {% elif s.startswith('Nose up') %}
+              Nose is up. Wind the jockey wheel down.
+            {% elif s.startswith('Nose down') %}
+              Nose is down. Wind the jockey wheel up.
+            {% elif s.startswith('Preset - travel limit') %}
+              Preset travel limit. Check the load.
+            {% elif s == 'Stopped by user' %}
+              Suspension stopped.
+            {% elif s == 'Dump complete' %}
+              Full dump complete.
+            {% elif s.startswith('Level aborted - Trailer moving') %}
+              Cannot level. The trailer is moving.
+            {% elif s.startswith('Level aborted - Close Off-Road') %}
+              Cannot level. Close off road articulation first.
+            {% elif s.startswith('Aborted - Close Off-Road') %}
+              Aborted. Close off road articulation first.
+            {% elif s.startswith('Aborted - Disconnected') or s.startswith('Level aborted - Disconnected') %}
+              Suspension aborted. Manifold disconnected.
+            {% elif s.startswith('Aborted') or s.startswith('Level aborted') %}
+              {{ m | replace('Level aborted - ','Aborted. ') | replace('Aborted - ','Aborted. ') }}
+            {% else %}
+              {# unknown status: stay silent rather than read raw text #}
+            {% endif %}
