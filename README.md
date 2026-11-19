@@ -22,6 +22,27 @@ This is the configuration running on a real trailer, published with credentials
 and identifying details removed. Every calibration number in the docs says
 whether it was **measured**, **derived** or **assumed**.
 
+## Control panel
+
+![The front control panel](images/control-panel.jpg)
+
+Three ways to see and control the trailer, each one working on its own:
+
+- **Tablet**: the Home Assistant dashboard (screenshots below). Everything,
+  including suspension, cameras and connectivity.
+- **Renogy ONE Core**: the backup energy monitor. It shows battery state of
+  charge, current, voltage and remaining capacity straight from the Renogy
+  devices, so it keeps working when Home Assistant or the Raspberry Pi is down.
+- **Buttons**: the physical touch points, wired to the relay board's inputs and
+  handled in its firmware. They stay in sync with the relay board: each
+  button's ring LED is fed from its relay's output, so it shows the real state
+  whether the circuit was switched from the button, the dashboard or the board
+  itself.
+
+Also on the panel: the two water tank gauges with their power button, and the
+awning rockers with the awning power button. Wiring:
+[hardware/wiring.md](hardware/wiring.md).
+
 ![Home tab](images/tab-home.png)
 
 ## Dashboard tabs

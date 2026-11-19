@@ -128,7 +128,7 @@ differs by model, so match by the markings on the button.
 | B09 | Water pump | DI09 | RE09 | F06 10 A |
 | B10 | Awning red R | DI10 | RE10 | F05 5 A |
 | B11 | Inverter: firmware switches RE11, LED from RE12 | DI11 | RE11 / RE12 | F07 2 A |
-| B12 | spare in the drawing (wired to DI12, LED not connected) | DI12 | — | — |
+| B12 | spare in the drawing (wired to DI12, LED not connected). As built: **Steps Power**, see [differences](#where-the-drawing-and-the-firmware-differ) | DI12 | — | — |
 | B14 | Water gauges on/off (sheet 4) | DI14 | RE14 | F07 2 A |
 | AWN | Awning power: latching, 20 A rated, **not on the KC868** | — | — | F10 15 A |
 
@@ -143,6 +143,22 @@ and the awning rockers with the AWN button sit to the right.
 
 On sheet 2 the panel is drawn **from the back**, so it is mirrored: B01 is on
 the right there.
+
+### As built
+
+![The front control panel as built](../images/control-panel.jpg)
+
+Labels on the built panel, from the front:
+
+| | Column 1 | 2 | 3 | 4 | 5 | 6 |
+|---|---|---|---|---|---|---|
+| **Top (inside)** | B01 Main Light | B03 Bedroom | B05 Bedroom RED | B07 Ventilation Fan | B09 Water Pump | B11 Inverter 220V |
+| **Bottom (outside)** | B02 Outdoor Left | B04 Outdoor Front | B06 Outdoor Right | B08 Awning Left | B10 Awning Right | B12 Steps Power |
+
+To the right: the Renogy ONE Core display, the two water gauges with **Tank
+Gauge Power** (B14) between them, and the **Awning Left** and **Awning Right**
+rockers with **Awning Power** (AWN) between them. The tablet with the Home
+Assistant dashboard is mounted on the left.
 
 ## Sheet 4 — Water gauges
 
@@ -175,7 +191,7 @@ three relays and two inputs. The firmware and the dashboard use them like this:
 | RE13 | spare | **Steps**, toggled by B12 through DI12 (since firmware v2.2.0) |
 | RE15 | spare (the jack box has its own button and relay, fed from ANL2) | **Stabilisers**: locking switch on DI15, always off at boot, 10-minute auto-off (since v2.1.9) |
 | RE16 | spare | **Tank & pipe heater**, reserved |
-| DI12 / B12 | spare button, LED not connected | toggles Steps |
+| DI12 / B12 | spare button, LED not connected | toggles Steps. The built panel matches the firmware: B12 is labelled **Steps Power**, and in the photo its LED is lit while the dashboard shows Steps on. |
 | DI15 | spare | Stabilisers switch |
 | Free inputs | DI13, DI15, DI16 | DI13, DI16 |
 

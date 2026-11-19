@@ -33,6 +33,20 @@ are listed there.
 
 Free inputs: **DI13 and DI16**.
 
+## Physical buttons
+
+The front panel's 12 illuminated buttons are the physical touch points
+([photo and labels](../hardware/wiring.md#as-built)). Each button closes its
+input `DInn`, and the **firmware** toggles relay `REnn`, so they work with Home
+Assistant, the Pi or the network down.
+
+They stay in sync with the relay board because each button's ring LED is wired
+to its relay's output (the NO terminal, in a twin ferrule with the load wire).
+The LED lights only when the relay is actually on, whether it was switched from
+the button, the dashboard, the RF remote, a schedule or a timer. There is no
+separate LED state to drift out of step. The exception is the inverter: its LED
+has its own relay (12), ganged to relay 11 in firmware (below).
+
 ## Three relays that need explanation
 
 ### Relay 11 + 12 — the inverter gang
