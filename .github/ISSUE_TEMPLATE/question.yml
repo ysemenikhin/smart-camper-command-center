@@ -1,0 +1,36 @@
+name: Question
+description: Ask about rebuilding or adapting this setup.
+labels: [question]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please check the docs first, especially docs/12-installation.md and
+        docs/15-troubleshooting.md. Do not paste secrets, addresses or locations.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Hardware / BOM / wiring
+        - Air suspension
+        - Relay board
+        - Energy (BMS, MPPT, shunt)
+        - Water tanks and temperatures
+        - Connectivity (router, GPS, cellwatch)
+        - Dashboard
+        - Installation / calibration
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: question
+    attributes:
+      label: Your question
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Your setup
+      description: Hardware, versions, and what you have tried so far.

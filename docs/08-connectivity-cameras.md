@@ -101,7 +101,7 @@ compromise: full frame with scrolling, or no scrolling with dead space.
 ## GPS
 
 The router's built-in GNSS feeds Home Assistant through a webhook
-(`router/usr/bin/camper-gps.sh` → `packages/camper_gps.yaml`). It provides:
+(`router-scripts/usr/bin/camper-gps.sh` → `packages/camper_gps.yaml`). It provides:
 
 - `device_tracker.camper_gps`;
 - speed, heading, altitude and satellite sensors;
