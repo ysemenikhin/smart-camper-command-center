@@ -7,6 +7,9 @@ Home Assistant + ESPHome control system for **Nemesis**, a homemade off-road
 expedition trailer (a Bruder EXP-8 replica). Air suspension, power, water,
 heating, lighting, cameras and connectivity, in one place.
 
+**Road-tested:** about 7,000 km of towing so far, about 1,000 km of it on heavy
+off-road tracks.
+
 ![The front control panel](images/control-panel.jpg)
 
 ## What it solves
@@ -29,7 +32,8 @@ This project brings all of them into Home Assistant:
   the ESP32 firmware, so they keep working if Home Assistant, the Raspberry Pi
   or the network is down.
 
-This is the configuration running on the real trailer, published with
+This is the configuration running on the real trailer, tested over about
+7,000 km including about 1,000 km of heavy off-road tracks, and published with
 credentials and identifying details removed. Every calibration number in the
 docs says whether it was **measured**, **derived** or **assumed**.
 
