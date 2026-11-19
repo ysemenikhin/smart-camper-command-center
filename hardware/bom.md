@@ -3,6 +3,8 @@
 Everything physically in the trailer. Where a choice was non-obvious, the reason
 is given — those reasons are usually the useful part.
 
+How it is all connected, cable by cable: [Wiring](wiring.md).
+
 ## Controllers
 
 | Item | Detail | Notes |
@@ -19,7 +21,7 @@ Ethernet, for less than the cost of wiring that many separate modules. The
 opto-isolated inputs matter: every relay has a real switch beside it, so the
 trailer works with Home Assistant switched off.
 
-Its quirks are documented in [05 — Relay board](05-relay-board.md). The important
+Its quirks are documented in [05 — Relay board](../docs/05-relay-board.md). The important
 one: relays and inputs are on **four PCF8574 I²C expanders**, not native GPIO.
 
 ## Pneumatics
@@ -87,7 +89,7 @@ and tapping a tile opens that camera's full-resolution main stream.
 
 ## Loads on the relay board
 
-See [05 — Relay board](05-relay-board.md) for the full map. Summary: interior and
+See [05 — Relay board](../docs/05-relay-board.md) for the full map. Summary: interior and
 exterior lighting, awning lights, inverter, fan, water pump, electric steps,
 water gauges, stabiliser circuit, tank heating.
 
@@ -102,4 +104,4 @@ freed or additional hardware.
 - No brake or road-legal lighting control — deliberately. Road lighting is
   wired conventionally and is not on any relay this software can reach.
 
-That last one is a safety boundary, not an omission. See [11 — Safety](11-safety.md).
+That last one is a safety boundary, not an omission. See [11 — Safety](../docs/11-safety.md).

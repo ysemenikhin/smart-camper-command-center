@@ -129,5 +129,5 @@ as missing.** Several bugs in this project's history were caused by a
 
 ## Next
 
-- [02 — Hardware & BOM](02-hardware-bom.md)
+- [02 — Hardware & BOM](../hardware/bom.md)
 - [04 — Air suspension](04-air-suspension.md) for the levelling algorithm in detail

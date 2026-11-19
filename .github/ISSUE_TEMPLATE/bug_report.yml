@@ -1,0 +1,71 @@
+name: Bug report
+description: Something in this configuration does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Do not paste secrets** (Wi-Fi, keys, MAC or IP
+        addresses, GPS positions). If the bug is a leaked secret or unsafe
+        behaviour, use SECURITY.md instead of this form.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Dashboard (dashboard/)
+        - HA package (packages/camper.yaml)
+        - Light effects / GPS / voice package
+        - Relay board firmware (esphome/relay-board.yaml)
+        - Air suspension firmware (esphome/air-suspension-s3.yaml)
+        - Router scripts (router-scripts/)
+        - Theme
+        - Wiring / hardware docs
+        - Other docs
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Component version
+      description: From the file header, or the "Config Version" sensor for the ESPHome boards.
+      placeholder: e.g. relay-board v2.3.9
+    validations:
+      required: true
+  - type: input
+    id: ha-version
+    attributes:
+      label: Home Assistant and ESPHome versions
+      placeholder: e.g. HA 2026.10.2, ESPHome 2026.10.2
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what you saw.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant ESPHome or Home Assistant log lines, with secrets removed.
+      render: text
+  - type: textarea
+    id: hardware
+    attributes:
+      label: Your hardware, if it differs
+      description: Boards, manifold, BMS, sensors or wiring that differ from the BOM.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I removed all secrets, addresses and locations from this report.
+          required: true
+        - label: I checked docs/15-troubleshooting.md.

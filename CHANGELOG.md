@@ -1,6 +1,19 @@
 # Changelog
 
-One entry per released version, newest first. Each version is a git commit and an annotated tag; the full reasoning is in the commit body and in the changelog header of the file itself.
+One entry per released version, newest first. The full reasoning for each version is in the changelog header of the file itself.
+
+Versions up to the public release (dashboard v206, relay board v2.3.8 and older) were developed in a private repository. Their entries are kept below for reference, but their commits and tags are not part of this repository. From the public release on, each version is tagged here; see [docs/14-versioning.md](docs/14-versioning.md).
+
+## Public release — 2026-11-18
+
+| Date | Tag | Change |
+|---|---|---|
+| 2026-11-18 | `dashboard-v207` | Header title line said v145; it now shows the current version. Comment-only, the dashboard is identical to v206. |
+| 2026-11-18 | `relay-board-v2.3.9` | DS18B20 address tags removed from the comments (addresses stay in `secrets.yaml`). Comments and Config Version only; firmware behaves as v2.3.8. |
+
+Repository: files moved to the public layout (`esphome/`, `packages/`, `dashboard/`, `themes/`, `router-scripts/`, `docs/`, `hardware/`, `images/`); real dashboard screenshots with private details blurred; wiring diagram (front 12 V, v10); integrations doc corrected to the running system; troubleshooting doc; contributor files, issue and PR templates; CI validates ESPHome configs on every pull request.
+
+## Before the public release
 
 | Date | Tag | Change |
 |---|---|---|

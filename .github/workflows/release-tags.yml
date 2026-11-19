@@ -1,0 +1,41 @@
+name: release-tags
+# Creates the tags listed in .github/release-tags.txt, with a GitHub Release each.
+# Runs when that file changes on main. Tags that already exist are skipped.
+on:
+  push:
+    branches: [main]
+    paths: [".github/release-tags.txt"]
+
+permissions:
+  contents: write
+
+jobs:
+  tags:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - name: create missing tags and releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          grep -vE '^[[:space:]]*(#|$)' .github/release-tags.txt | tr -d '\r' | while read -r tag; do
+            if ! [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              echo "::error::invalid tag name: $tag"; exit 1
+            fi
+            if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+              echo "skip $tag (already exists)"; continue
+            fi
+            notes=".github/release-notes/$tag.md"
+            if [ ! -f "$notes" ]; then
+              notes="$(mktemp)"
+              grep -F "\`$tag\`" CHANGELOG.md > "$notes" || echo "$tag" > "$notes"
+            fi
+            git tag -a "$tag" -m "$tag"
+            git push origin "refs/tags/$tag"
+            gh release create "$tag" --title "$tag" --notes-file "$notes" --verify-tag
+            echo "created $tag"
+          done

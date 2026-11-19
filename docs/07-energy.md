@@ -26,6 +26,14 @@ graph TB
     SH -.->|fallback| HA
 ```
 
+## Backup monitor: Renogy ONE Core
+
+The **Renogy ONE Core** display on the front control panel
+([photo](../hardware/wiring.md#as-built)) is the backup energy monitor. It talks
+to the Renogy devices directly and shows battery state of charge, current,
+voltage, remaining capacity and time to full without Home Assistant. If the Pi,
+Home Assistant or the network is down, the energy picture is still on the wall.
+
 ## The fallback rule
 
 This is the most important design decision in this subsystem.

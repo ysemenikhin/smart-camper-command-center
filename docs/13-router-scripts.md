@@ -6,16 +6,16 @@ procd init script, which also restarts it if it stops.
 
 | File on the router | Repo path | Purpose |
 |---|---|---|
-| `/usr/bin/camper-gps.sh` | `router/usr/bin/camper-gps.sh` | Modem GPS → HA webhook |
-| `/etc/init.d/camper-gps` | `router/etc/init.d/camper-gps` | procd service for the above |
-| `/usr/bin/camper-cellwatch.sh` | `router/usr/bin/camper-cellwatch.sh` | Pulls the modem off a stuck 3G cell |
-| `/etc/init.d/camper-cellwatch` | `router/etc/init.d/camper-cellwatch` | procd service for the above |
+| `/usr/bin/camper-gps.sh` | `router-scripts/usr/bin/camper-gps.sh` | Modem GPS → HA webhook |
+| `/etc/init.d/camper-gps` | `router-scripts/etc/init.d/camper-gps` | procd service for the above |
+| `/usr/bin/camper-cellwatch.sh` | `router-scripts/usr/bin/camper-cellwatch.sh` | Pulls the modem off a stuck 3G cell |
+| `/etc/init.d/camper-cellwatch` | `router-scripts/etc/init.d/camper-cellwatch` | procd service for the above |
 
 Install either pair the same way:
 
 ```sh
-scp router/usr/bin/camper-gps.sh   root@<router>:/usr/bin/
-scp router/etc/init.d/camper-gps   root@<router>:/etc/init.d/
+scp router-scripts/usr/bin/camper-gps.sh   root@<router>:/usr/bin/
+scp router-scripts/etc/init.d/camper-gps   root@<router>:/etc/init.d/
 ssh root@<router> 'chmod +x /usr/bin/camper-gps.sh /etc/init.d/camper-gps \
                    && /etc/init.d/camper-gps enable && /etc/init.d/camper-gps start'
 ```

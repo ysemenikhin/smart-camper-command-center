@@ -1,7 +1,10 @@
-# Rendering the documentation screenshots
+# Rendering demo screenshots
 
-The images in `docs/images/` are produced from this repository's code, not
-photographed off the trailer. Anyone can regenerate them:
+Most images in `images/` are real screenshots from the trailer, with private
+details blurred. Two are demo renders made with this tool:
+`tab-suspension-unlocked.png` and `tab-water-alert.png`. Use it to render the
+whole dashboard from this repository's code with demo values, without any
+hardware:
 
 1. **Install HA in a venv.**
    ```sh
@@ -12,8 +15,8 @@ photographed off the trailer. Anyone can regenerate them:
    ```sh
    mkdir -p config/themes config/www/community
    cp configuration.yaml config/
-   cp ../../homeassistant/themes/garmin_dark.yaml config/themes/
-   cp ../../homeassistant/dashboards/smart-camper-dashboard.yaml config/ui-lovelace.yaml
+   cp ../../themes/garmin_dark.yaml config/themes/
+   cp ../../dashboard/smart-camper-dashboard.yaml config/ui-lovelace.yaml
    ```
 3. **Add the custom cards.** Put `button-card.js`, `card-mod.js` and
    `apexcharts-card.js` from their GitHub releases into `config/www/community/`.
