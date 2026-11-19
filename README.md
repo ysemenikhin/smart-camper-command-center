@@ -3,37 +3,46 @@
 [![ci](https://github.com/ysemenikhin/smart-camper-command-center/actions/workflows/ci.yml/badge.svg)](https://github.com/ysemenikhin/smart-camper-command-center/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Home Assistant + ESPHome control system for an off-road expedition trailer:
-
-- **Four-corner air suspension** with IMU auto-levelling, five drive modes and
-  off-road articulation.
-- **16 relay circuits** with physical buttons, an RF433 remote and an RTC
-  schedule.
-- **Tank metering** in litres, and **freeze monitoring** with four DS18B20
-  sensors.
-- **Dual LiFePO₄ banks** with shunt fallback, and **1320 W solar** on two MPPTs.
-- **Diesel heater** with a virtual fuel tank.
-- **Cameras**, plus **cellular / Wi-Fi / Starlink** status, a router **GPS
-  tracker** and a 3G watchdog.
-
-It all runs on a dark dashboard built for a 10" wall tablet.
-
-This is the configuration running on a real trailer, published with credentials
-and identifying details removed. Every calibration number in the docs says
-whether it was **measured**, **derived** or **assumed**.
-
-## Control panel
+Home Assistant + ESPHome control system for **Nemesis**, a homemade off-road
+expedition trailer (a Bruder EXP-8 replica). Air suspension, power, water,
+heating, lighting, cameras and connectivity, in one place.
 
 ![The front control panel](images/control-panel.jpg)
 
+## What it solves
+
+A self-built expedition trailer ends up with a separate app for every system:
+one for the air suspension manifold, one for the batteries, one for the solar
+controllers, one for the heater, one for the router. None of them share data,
+none keep history, and none can act on what another one sees.
+
+This project brings all of them into Home Assistant:
+
+- **One central panel:** a wall tablet with the dashboard, physical buttons
+  that work on their own, and a backup energy display.
+- **History:** every corner height, bag pressure, roll and pitch reading is
+  recorded, so the suspension, shocks and air bags are tuned from data instead
+  of guesswork.
+- **Automation:** ride modes, auto-levelling, auto-maintain, lighting scenes and
+  heating run by rules, not by hand.
+- **Works without the network:** safety logic and the physical buttons live in
+  the ESP32 firmware, so they keep working if Home Assistant, the Raspberry Pi
+  or the network is down.
+
+This is the configuration running on the real trailer, published with
+credentials and identifying details removed. Every calibration number in the
+docs says whether it was **measured**, **derived** or **assumed**.
+
+## Control panel
+
 Three ways to see and control the trailer, each one working on its own:
 
-- **Tablet**: the Home Assistant dashboard (screenshots below). Everything,
+- **Tablet:** the Home Assistant dashboard (screenshots below). Everything,
   including suspension, cameras and connectivity.
-- **Renogy ONE Core**: the backup energy monitor. It shows battery state of
+- **Renogy ONE Core:** the backup energy monitor. It shows battery state of
   charge, current, voltage and remaining capacity straight from the Renogy
   devices, so it keeps working when Home Assistant or the Raspberry Pi is down.
-- **Buttons**: the physical touch points, wired to the relay board's inputs and
+- **Buttons:** the physical touch points, wired to the relay board's inputs and
   handled in its firmware. They stay in sync with the relay board: each
   button's ring LED is fed from its relay's output, so it shows the real state
   whether the circuit was switched from the button, the dashboard or the board
@@ -43,7 +52,123 @@ Also on the panel: the two water tank gauges with their power button, and the
 awning rockers with the awning power button. Wiring:
 [hardware/wiring.md](hardware/wiring.md).
 
-![Home tab](images/tab-home.png)
+## What it does, and why
+
+### Air suspension, managed by Home Assistant
+
+The trailer rides on four air bags, one per independent A-frame corner, fed by a
+DEPCON DN-3G manifold. Instead of driving it from the manifold's own phone app,
+an ESP32-S3 talks to it over Bluetooth and brings it into Home Assistant,
+together with an IMU (accelerometer and gyro) and a height sensor at every
+corner. That gives:
+
+- **Roll, pitch and road condition**, live and recorded.
+- **Control by real suspension position, not by air pressure.** The trailer's
+  weight is not spread evenly and it changes with water, gear and people, so the
+  same PSI gives a different stance at each corner. The height sensors let you
+  set each corner by its actual travel in centimetres.
+- **Automatic fallback to pressure.** If a height sensor fails, the firmware
+  switches to PSI targets on its own and the dashboard shows a banner, so a dead
+  sensor can never make a corner inflate without limit.
+- **Ride modes.** Each mode is a set of height targets, plus PSI targets for the
+  fallback:
+
+| Mode | When |
+|---|---|
+| Parked | At camp: levelled, low and stable |
+| Highway Normal Load | Towing on the road |
+| Highway Heavy Load | Towing loaded |
+| Off-Road | Raised, with the articulation valves open so each side's front and rear bags share air and the axles articulate |
+| Easy Maneuver | Turning the trailer by hand (below) |
+
+### Auto-level with one button
+
+Park, press **Auto Level**, and the trailer levels itself from the IMU. No
+walking around with a spirit level, no blocks: a level bed and a good night's
+sleep.
+
+### Auto-maintain
+
+A levelled trailer does not stay level. People move around and sleep on one
+side, water moves from the clean tank to the grey tank or out onto the ground,
+and the weight distribution changes. **Auto Maintain** keeps watching and
+corrects the stance.
+
+### Live roll and travel while towing
+
+On the road, and especially off-road, the dashboard shows live roll, pitch and
+each corner's travel. On a steep cross-slope you raise the downhill side to keep
+the trailer closer to upright. On a narrow track the same control tilts the
+body: the trailer is 3 m tall, so a small tilt moves the roof up to 40 cm to
+either side, enough to clear a canyon wall or a tree.
+
+### Easy Maneuver: turn a 3-tonne trailer by hand
+
+One button drops the rear axle to its lowest position, close to 0 psi, and
+raises the front axle to its highest. The load moves onto the front axle, the
+trailer pivots around it instead of scrubbing all four tyres sideways, and a
+3 t expedition trailer can be turned by hand.
+
+### Emergency: tow on three wheels
+
+Each corner is an independent A-frame. If a tyre is lost, that corner can be
+held at its lowest position while the other corners raise, lifting the damaged
+wheel clear so the trailer can be towed out. Emergency use only: slowly and over
+a short distance. Read [11 — Safety](docs/11-safety.md) first.
+
+### 16 relay circuits, scenes and automation
+
+A KinCony KC868-A16S switches the trailer's 12 V circuits: lights, water pump,
+fan, inverter, steps, stabilisers, awning lights and the tank gauges. Because
+they are all in Home Assistant, they can be automated:
+
+- Switch the front LED bar or the side lights from the truck at night.
+- Start the diesel heater ahead of time, so the cabin is at the target
+  temperature when you arrive.
+- Lights on a schedule or from a motion sensor.
+- **Night Mode:** one press for dim red light only, a second press for full
+  dark. The button LEDs follow their relays, so the panel goes dark too.
+- Scenes: all lights, exterior, stealth (reds only), and police and flash
+  effects.
+
+### Energy: monitoring and prediction
+
+Two 460 Ah LiFePO₄ banks, 1320 W of solar on two MPPTs, and a 920 Ah shunt.
+Beyond protection, the point is prediction off-grid: energy stored, time left at
+the current load, time to full, and today's and tomorrow's solar forecast, so
+the stay can be planned around it. If a battery drops off Bluetooth, every
+figure switches to the shunt as one coherent source.
+
+### Always online
+
+Connectivity is a must, so there are three independent paths, chosen
+automatically by predefined rules, with no need to touch the router:
+
+- **Cellular 3G/4G/5G** on a GL.iNet X3000 with dual SIM, on two different
+  carriers.
+- **Starlink Mini** for remote places with no cellular coverage.
+- **Repeater mode** on the home Wi-Fi when the trailer is parked.
+
+Home Assistant shows which link is actually carrying traffic and tests the
+internet end to end. A watchdog pulls the modem back to LTE when it gets stuck
+on 3G, and the router's GPS feeds a tracker and the weather location.
+
+### Also
+
+- **Water:** clean and grey tanks in litres, and four temperature sensors on the
+  tanks and pipes for freeze monitoring.
+- **Diesel heater** over Bluetooth, with a virtual fuel tank that counts the
+  litres burned.
+- **Cameras:** four sides and the interior, a light sub-stream on the dashboard
+  and the full stream on tap.
+
+## Planned
+
+- **GPS drive protection:** when the router's GPS sees the trailer moving and
+  the suspension is not in a drive mode, switch to Highway automatically.
+  Driving off with the trailer still parked has already happened once.
+- **Frigate NVR with a Google Coral AI accelerator:** recording for all cameras,
+  smart object detection and a security system.
 
 ## Dashboard tabs
 
